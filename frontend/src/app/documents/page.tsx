@@ -1,0 +1,166 @@
+'use client';
+
+import { useEffect, useState, useRef } from 'react';
+import { api } from '@/lib/api';
+import {
+  FileText, Upload, Trash2, Clock,
+  CheckCircle2, Loader2,
+} from 'lucide-react';
+
+interface Doc {
+  id: string;
+  title: string;
+  filename: string;
+  file_type: string;
+  file_size: number | null;
+  drift_score: number;
+  semantic_drift_score: number;
+  factual_drift_score: number;
+  drift_type: string | null;
+  is_processed: boolean;
+  created_at: string;
+}
+
+export default function DocumentsPage() {
+  const [docs, setDocs] = useState<Doc[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const loadDocs = async () => {
+    try {
+      const data = await api.listDocuments();
+      setDocs(data.documents);
+      setTotal(data.total);
+    } catch (err) {
+      console.error('Failed to load docs:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { loadDocs(); }, []);
+
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      await api.uploadDocument(file);
+      await loadDocs();
+    } catch (err: any) {
+      alert(`Upload failed: ${err.message}`);
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    if (!confirm('Delete this document?')) return;
+    try {
+      await api.deleteDocument(id);
+      await loadDocs();
+    } catch (err: any) {
+      alert(`Delete failed: ${err.message}`);
+    }
+  };
+
+  const formatSize = (bytes: number | null) => {
+    if (!bytes) return '—';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / 1048576).toFixed(1)} MB`;
+  };
+
+  const getDriftColor = (score: number) => {
+    if (score >= 60) return 'var(--severity-critical)';
+    if (score >= 30) return 'var(--severity-high)';
+    if (score >= 10) return 'var(--severity-medium)';
+    return 'var(--accent-emerald)';
+  };
+
+  return (
+    <div className="fade-in">
+      <div className="page-header">
+        <div>
+          <h1 className="page-title"><FileText size={24} /> Documents</h1>
+          <p className="page-subtitle">{total} documents in your knowledge base</p>
+        </div>
+        <div>
+          <input type="file" ref={fileInputRef} onChange={handleUpload} style={{ display: 'none' }}
+            accept=".pdf,.docx,.txt,.md" />
+          <button className="btn btn-primary" onClick={() => fileInputRef.current?.click()} disabled={uploading}>
+            {uploading ? <><Loader2 size={16} className="spin" /> Uploading...</> : <><Upload size={16} /> Upload</>}
+          </button>
+        </div>
+      </div>
+
+      {loading ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {[1, 2, 3].map((i) => <div key={i} className="skeleton" style={{ height: 60, borderRadius: 12 }} />)}
+        </div>
+      ) : docs.length === 0 ? (
+        <div className="empty-state">
+          <FileText /><p>No documents yet. Upload your first document to get started.</p>
+        </div>
+      ) : (
+        <div className="table-wrapper">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Title</th>
+                <th>Type</th>
+                <th>Size</th>
+                <th>Inconsistency</th>
+                <th>Semantic Drift</th>
+                <th>Status</th>
+                <th>Uploaded</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {docs.map((doc, idx) => (
+                <tr key={doc.id} style={{ animation: `fadeInUp 300ms ease-out ${idx * 30}ms both` }}>
+                  <td style={{ fontWeight: 500 }}>{doc.title}</td>
+                  <td><span className="badge">{doc.file_type}</span></td>
+                  <td>{formatSize(doc.file_size)}</td>
+                  <td>
+                    <span style={{ color: getDriftColor(doc.factual_drift_score || 0), fontWeight: 600 }}>
+                      {(doc.factual_drift_score || 0).toFixed(1)}
+                    </span>
+                  </td>
+                  <td>
+                    <span style={{ color: getDriftColor(doc.semantic_drift_score || 0), fontWeight: 600 }}>
+                      {(doc.semantic_drift_score || 0).toFixed(1)}
+                    </span>
+                  </td>
+                  <td>
+                    {doc.is_processed ? (
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--accent-emerald)', fontSize: '0.8rem' }}>
+                        <CheckCircle2 size={14} /> Processed
+                      </span>
+                    ) : (
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                        <Clock size={14} /> Pending
+                      </span>
+                    )}
+                  </td>
+                  <td style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                    {new Date(doc.created_at).toLocaleDateString()}
+                  </td>
+                  <td>
+                    <button className="btn btn-sm btn-secondary" onClick={() => handleDelete(doc.id)}>
+                      <Trash2 size={14} />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
