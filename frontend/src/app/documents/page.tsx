@@ -4,7 +4,7 @@ import { useEffect, useState, useRef } from 'react';
 import { api } from '@/lib/api';
 import {
   FileText, Upload, Trash2, Clock,
-  CheckCircle2, Loader2,
+  CheckCircle2, Loader2, AlertTriangle,
 } from 'lucide-react';
 
 interface Doc {
@@ -27,6 +27,7 @@ export default function DocumentsPage() {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploadMsg, setUploadMsg] = useState<{ type: 'error' | 'info' | 'success'; text: string } | null>(null);
 
   const loadDocs = async () => {
     try {
@@ -46,14 +47,27 @@ export default function DocumentsPage() {
     const file = e.target.files?.[0];
     if (!file) return;
     setUploading(true);
+    setUploadMsg(null);
     try {
-      await api.uploadDocument(file);
+      const result = await api.uploadDocument(file);
       await loadDocs();
+      if (result.version_number && result.version_number > 1) {
+        setUploadMsg({ type: 'success', text: `Uploaded as version ${result.version_number} (supersedes previous version)` });
+      }
     } catch (err: any) {
-      alert(`Upload failed: ${err.message}`);
+      if (err.status === 409) {
+        const data = err.data || {};
+        setUploadMsg({
+          type: 'info',
+          text: `Duplicate detected: "${data.existing_title || 'document'}" already exists with identical content.`,
+        });
+      } else {
+        setUploadMsg({ type: 'error', text: `Upload failed: ${err.message}` });
+      }
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
+      setTimeout(() => setUploadMsg(null), 8000);
     }
   };
 
@@ -97,6 +111,16 @@ export default function DocumentsPage() {
         </div>
       </div>
 
+      {/* Upload message toast */}
+      {uploadMsg && (
+        <div className={`upload-toast toast-${uploadMsg.type}`}>
+          {uploadMsg.type === 'info' && <AlertTriangle size={14} />}
+          {uploadMsg.type === 'success' && <CheckCircle2 size={14} />}
+          {uploadMsg.type === 'error' && <AlertTriangle size={14} />}
+          {uploadMsg.text}
+        </div>
+      )}
+
       {loading ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {[1, 2, 3].map((i) => <div key={i} className="skeleton" style={{ height: 60, borderRadius: 12 }} />)}
@@ -123,7 +147,14 @@ export default function DocumentsPage() {
             <tbody>
               {docs.map((doc, idx) => (
                 <tr key={doc.id} style={{ animation: `fadeInUp 300ms ease-out ${idx * 30}ms both` }}>
-                  <td style={{ fontWeight: 500 }}>{doc.title}</td>
+                  <td style={{ fontWeight: 500 }}>
+                    {doc.title}
+                    {(doc as any).version_number > 1 && (
+                      <span className="badge" style={{ marginLeft: 6, fontSize: '0.6rem', background: 'rgba(124, 92, 252, 0.12)', color: 'var(--accent-indigo)' }}>
+                        v{(doc as any).version_number}
+                      </span>
+                    )}
+                  </td>
                   <td><span className="badge">{doc.file_type}</span></td>
                   <td>{formatSize(doc.file_size)}</td>
                   <td>
