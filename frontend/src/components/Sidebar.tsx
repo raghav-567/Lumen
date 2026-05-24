@@ -12,14 +12,18 @@ import {
   LogOut,
   ChevronLeft,
   Zap,
+  Settings,
+  Scale,
 } from 'lucide-react';
 
 const navItems = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/documents', label: 'Documents', icon: FileText },
   { href: '/alerts', label: 'Alerts', icon: Bell, hasNotification: true },
+  { href: '/reviews', label: 'Reviews', icon: Scale },
   { href: '/search', label: 'Search', icon: Search },
   { href: '/graph', label: 'Knowledge Graph', icon: Network },
+  { href: '/admin', label: 'Admin', icon: Settings },
 ];
 
 interface SidebarProps {
