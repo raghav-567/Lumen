@@ -55,7 +55,10 @@ class ApiClient {
 
     if (!res.ok) {
       const error = await res.json().catch(() => ({ detail: 'Request failed' }));
-      throw new Error(error.detail || `HTTP ${res.status}`);
+      const err: any = new Error(error.detail || error.message || `HTTP ${res.status}`);
+      err.status = res.status;
+      err.data = error;
+      throw err;
     }
 
     if (res.status === 204) return {} as T;
@@ -146,6 +149,33 @@ class ApiClient {
     });
   }
 
+  // ── Reviews ──────────────────────────────────────────
+
+  async listReviews(params?: { review_status?: string; limit?: number; offset?: number }) {
+    const qs = new URLSearchParams();
+    if (params?.review_status) qs.set('review_status', params.review_status);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    if (params?.offset) qs.set('offset', String(params.offset));
+    return this.request<{ items: any[]; total: number; limit: number; offset: number }>(`/reviews?${qs}`);
+  }
+
+  async getReviewStats() {
+    return this.request<any>('/reviews/stats');
+  }
+
+  async submitReview(contradictionId: string, data: { review_status: string; review_reason?: string }) {
+    return this.request<any>(`/reviews/${contradictionId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getExplanation(contradictionId: string) {
+    return this.request<{ explanation: string; cached: boolean }>(`/reviews/${contradictionId}/explain`, {
+      method: 'POST',
+    });
+  }
+
   // ── Drift & Graph ────────────────────────────────────
 
   async getDriftScores() {
@@ -162,6 +192,75 @@ class ApiClient {
 
   async getEntities() {
     return this.request<any[]>('/graph/entities');
+  }
+
+  // ── Admin (Changes 1, 3, 5, 6) ──────────────────────
+
+  async getGateCalibration() {
+    return this.request<{
+      current_threshold: number;
+      sample_rate: number;
+      total_sampled_pairs: number;
+      total_above_threshold_pairs: number;
+      sampled_contradictions: number;
+      sampled_contradiction_rate: number;
+      sampled_similarity: { avg: number | null; min: number | null; max: number | null };
+      above_threshold_similarity: { avg: number | null; min: number | null };
+      recommendation: { action: string; suggested_threshold: number; reason: string };
+    }>('/admin/gate-calibration');
+  }
+
+  async getLineageStats() {
+    return this.request<{
+      total_inferred_evolutions: number;
+      total_reviewed: number;
+      overrides: number;
+      confirmations: number;
+      override_rate: number;
+      overridden_signals: { avg_title_similarity: number | null; avg_date_gap_days: number | null };
+      confirmed_signals: { avg_title_similarity: number | null; avg_date_gap_days: number | null };
+      recommendation: string;
+    }>('/admin/lineage-heuristic-stats');
+  }
+
+  async getTaskStatus(taskId: string) {
+    return this.request<{
+      task_id: string;
+      status: string;
+      ready: boolean;
+      successful: boolean | null;
+      result?: any;
+      error?: string;
+      traceback?: string;
+      task_name?: string;
+      completed_at?: string;
+    }>(`/admin/tasks/${taskId}`);
+  }
+
+  async getDriftWeights() {
+    return this.request<{
+      org_id: string;
+      source: string;
+      density_weight: number;
+      confidence_weight: number;
+      volume_weight: number;
+      factual_weight: number;
+      semantic_weight: number;
+      updated_at?: string;
+    }>('/admin/drift-weights');
+  }
+
+  async updateDriftWeights(weights: {
+    density_weight: number;
+    confidence_weight: number;
+    volume_weight: number;
+    factual_weight: number;
+    semantic_weight: number;
+  }) {
+    return this.request<any>('/admin/drift-weights', {
+      method: 'PUT',
+      body: JSON.stringify(weights),
+    });
   }
 }
 
