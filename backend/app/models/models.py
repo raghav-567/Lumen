@@ -332,6 +332,10 @@ class ContradictionPair(Base):
     # ── Explanation cache invalidation (Change 8) ──
     explanation_valid = Column(Boolean, default=True)  # False = stale, needs re-generation
 
+    # ── Contradiction taxonomy (Fix 3.5) ──
+    contradiction_type = Column(String(50), nullable=True)  # direct_opposition, outcome_inversion, etc.
+    scan_path = Column(String(20), nullable=True)           # "structured" or "embedding"
+
     chunk_a = relationship("Chunk", foreign_keys=[chunk_a_id])
     chunk_b = relationship("Chunk", foreign_keys=[chunk_b_id])
     reviewer = relationship("User", foreign_keys=[reviewed_by])
