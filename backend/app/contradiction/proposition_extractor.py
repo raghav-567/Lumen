@@ -53,19 +53,25 @@ Text:
 
 _POSITIVE_SIGNALS = frozenset({
     "increased", "improved", "succeeded", "enhanced", "boosted",
-    "gained", "rose", "grew", "strengthened", "exceeded",
+    "gained", "rose", "grew", "strengthened",
     "effective", "efficient", "successful", "positive", "benefit",
     "offset", "maintained", "stable", "robust", "thrived",
-    "dropped", "reduced", "decreased",  # for costs/problems these are positive
+    "narrowed", "recovered", "transformed", "favorable",
+    "accelerated", "expanded", "optimized",
 })
 
 _NEGATIVE_SIGNALS = frozenset({
-    "decreased", "declined", "failed", "worsened", "struggled",
+    "declined", "failed", "worsened", "struggled",
     "insufficient", "inadequate", "minimal", "limited", "partial",
-    "fell", "dropped", "reduced", "deteriorated", "collapsed",
-    "exceeded",  # for costs this is negative
+    "fell", "deteriorated", "collapsed",
     "stalled", "stagnated", "underperformed",
+    "disrupted", "inconsistent", "uncertain", "complicated",
+    "widened", "concentrated", "unstable",
 })
+
+# Context-dependent words — NOT in either set because they flip meaning
+# based on what they modify (e.g., "costs dropped" = positive, "output dropped" = negative)
+# "dropped", "reduced", "decreased", "exceeded"
 
 _HEDGING_SIGNALS = frozenset({
     "suggested", "partially", "some", "somewhat", "may",
@@ -206,7 +212,7 @@ def _extract_rule_based(
     """Rule-based proposition extraction from sentences.
 
     Splits text into sentences, infers entity/attribute/polarity from
-    syntactic patterns. Less accurate than LLM but always available.
+    verb-boundary heuristic. More accurate than first-capitalized-word.
     """
     import nltk
     try:
@@ -214,24 +220,52 @@ def _extract_rule_based(
     except Exception:
         sentences = re.split(r'(?<=[.!?])\s+', text)
 
+    # Common verbs that mark the boundary between entity and attribute
+    _VERB_MARKERS = {
+        "is", "are", "was", "were", "has", "have", "had",
+        "shows", "showed", "indicates", "indicated",
+        "demonstrates", "demonstrated", "reveals", "revealed",
+        "improved", "declined", "increased", "decreased",
+        "reduced", "exceeded", "failed", "succeeded",
+        "requires", "required", "provides", "provided",
+        "maintains", "maintained", "supports", "supported",
+        "dropped", "rose", "fell", "grew", "gained",
+        "struggled", "achieved", "produced", "generated",
+        "offset", "surpassed", "led", "caused", "resulted",
+        "remained", "became", "experienced",
+    }
+
     propositions = []
     for sentence in sentences:
         sentence = sentence.strip()
         if len(sentence) < 30 or len(sentence.split()) < 5:
             continue
 
-        # Simple entity extraction: first noun phrase (capitalized words at start)
         words = sentence.split()
-        entity_words = []
-        for w in words[:6]:
-            if w[0].isupper() or w.lower() in ("the", "a", "an"):
-                entity_words.append(w)
-            else:
-                break
-        entity = " ".join(entity_words) if entity_words else words[0]
 
-        # Attribute: rest of sentence minus entity
-        attribute = " ".join(words[len(entity_words):])[:100]
+        # Find verb boundary — entity is everything before the first main verb
+        verb_idx = -1
+        for idx, w in enumerate(words):
+            if w.lower().rstrip(".,;:!?") in _VERB_MARKERS and idx >= 1:
+                verb_idx = idx
+                break
+
+        if verb_idx >= 1:
+            entity = " ".join(words[:verb_idx])
+            attribute = " ".join(words[verb_idx:])[:100]
+        else:
+            # Fallback: first noun phrase (capitalized words + articles)
+            entity_words = []
+            for w in words[:6]:
+                if w[0].isupper() or w.lower() in ("the", "a", "an"):
+                    entity_words.append(w)
+                else:
+                    break
+            entity = " ".join(entity_words) if entity_words else words[0]
+            attribute = " ".join(words[len(entity_words):])[:100]
+
+        # Strip leading articles from entity for cleaner matching
+        entity = re.sub(r'^(The|A|An)\s+', '', entity)
 
         polarity = _infer_polarity(sentence)
         confidence_level = _infer_confidence(sentence)
