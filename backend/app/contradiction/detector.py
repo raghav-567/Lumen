@@ -373,8 +373,7 @@ COMPARABLE_MODALITY_PAIRS = {
     ("RECOMMENDED", "RECOMMENDED"),
     ("OPTIONAL", "OPTIONAL"),
     ("INFORMATIONAL", "INFORMATIONAL"),
-    ("MANDATORY", "INFORMATIONAL"),
-    ("PROHIBITED", "INFORMATIONAL"),
+    # INFORMATIONAL ↔ MANDATORY/PROHIBITED removed — incomparable modalities
 }
 
 
@@ -409,6 +408,7 @@ def scan_claims_nli(
     claim_text: str,
     top_k: int = 5,
     metrics: "PipelineMetrics | None" = None,
+    source_modality: str | None = None,
 ) -> tuple[list[ContradictionResult], list[str]]:
     """Compare a claim against other claims using NLI with hierarchical reduction.
 
@@ -572,10 +572,9 @@ def scan_claims_nli(
         cand_text = cand["text"]
 
         # ── Fix 2.3: Modality alignment gate ──
-        claim_modality = cand.get("metadata", {}).get("modality")
-        # Source claim modality would need to come from the query — for now use permissive
-        if claim_modality and not modalities_are_comparable(None, claim_modality):
-            logger.debug(f"Skipping cross-modality pair: source vs {claim_modality}")
+        cand_modality = cand.get("metadata", {}).get("modality")
+        if not modalities_are_comparable(source_modality, cand_modality):
+            logger.debug(f"Skipping incompatible modality pair: {source_modality} vs {cand_modality}")
             continue
 
         # ── Fix 2.4: Specificity ratio — raise threshold for length-mismatched pairs ──
@@ -601,8 +600,8 @@ def scan_claims_nli(
             continue
 
         # ── Fix 2.2: Entailment asymmetry check ──
-        # Only run the expensive bidirectional check for high-confidence candidates
-        if score < 0.90:  # Very high scores are almost certainly genuine
+        # Only run the expensive bidirectional check if enabled and score < 0.90
+        if settings.ENTAILMENT_ASYMMETRY_CHECK and score < 0.90:
             genuine, reason = is_genuine_contradiction(claim_text, cand_text)
             if not genuine:
                 logger.debug(f"Filtered pair — reason: {reason} (score={score:.3f})")
@@ -764,7 +763,56 @@ def scan_structured(
 
 # ── Dual-path router ────────────────────────────────────
 
-STRUCTURE_CONFIDENCE_THRESHOLD = 0.65
+
+def _run_embedding_scan(
+    org_id: str,
+    doc_a_chunk_ids: list[str] | None,
+    doc_b_chunk_ids: list[str] | None,
+    doc_a_id: str,
+    doc_b_id: str,
+    metrics: "PipelineMetrics | None" = None,
+) -> list[ContradictionResult]:
+    """Run the embedding-based scan path for document chunks.
+
+    Fetches chunk content from ChromaDB and delegates to scan_claims_nli
+    for each chunk pair.
+    """
+    from app.ingestion.chroma_store import get_or_create_collection
+
+    all_chunk_ids = []
+    if doc_a_chunk_ids:
+        all_chunk_ids.extend(doc_a_chunk_ids)
+    if doc_b_chunk_ids:
+        all_chunk_ids.extend(doc_b_chunk_ids)
+
+    if not all_chunk_ids:
+        logger.info("Embedding scan fallback: no chunk IDs provided, skipping")
+        return []
+
+    # Fetch content from ChromaDB
+    collection = get_or_create_collection(org_id)
+    try:
+        got = collection.get(ids=all_chunk_ids, include=["documents", "metadatas"])
+    except Exception as e:
+        logger.warning(f"Embedding scan fallback: failed to fetch chunks from ChromaDB: {e}")
+        return []
+
+    results = []
+    for idx, chunk_id in enumerate(got.get("ids", [])):
+        text = (got.get("documents") or [])[idx] if got.get("documents") else None
+        if not text:
+            continue
+
+        chunk_results, _ = scan_claims_nli(
+            org_id=org_id,
+            claim_id=chunk_id,
+            claim_text=text,
+            top_k=5,
+            metrics=metrics,
+        )
+        results.extend(chunk_results)
+
+    return _deduplicate(results)
 
 
 def scan_document_pair_routed(
@@ -784,6 +832,7 @@ def scan_document_pair_routed(
     """
     from app.contradiction.section_aligner import SectionAligner
 
+    threshold = settings.STRUCTURED_SCAN_THRESHOLD
     aligner = SectionAligner()
 
     # Check structure confidence for both documents
@@ -795,24 +844,46 @@ def scan_document_pair_routed(
 
     logger.info(
         f"Scan router: structure_confidence A={conf_a:.2f}, B={conf_b:.2f}, "
-        f"min={min_confidence:.2f}, threshold={STRUCTURE_CONFIDENCE_THRESHOLD}"
+        f"min={min_confidence:.2f}, threshold={threshold}"
     )
 
-    if min_confidence >= STRUCTURE_CONFIDENCE_THRESHOLD:
-        results = scan_structured(
+    if min_confidence >= threshold:
+        try:
+            results = scan_structured(
+                org_id=org_id,
+                doc_a_text=doc_a_text,
+                doc_b_text=doc_b_text,
+                doc_a_id=doc_a_id,
+                doc_b_id=doc_b_id,
+                doc_a_chunk_ids=doc_a_chunk_ids,
+                doc_b_chunk_ids=doc_b_chunk_ids,
+                metrics=metrics,
+            )
+            return results, "structured"
+        except Exception as e:
+            logger.warning(
+                f"Structured scan failed, falling back to embedding scan: {e}",
+                exc_info=True,
+            )
+            # Actually run embedding scan instead of returning empty
+            results = _run_embedding_scan(
+                org_id=org_id,
+                doc_a_chunk_ids=doc_a_chunk_ids,
+                doc_b_chunk_ids=doc_b_chunk_ids,
+                doc_a_id=doc_a_id,
+                doc_b_id=doc_b_id,
+                metrics=metrics,
+            )
+            return results, "embedding"
+    else:
+        # Insufficient document structure — use embedding-based scan
+        logger.info("Using embedding scan path (insufficient document structure)")
+        results = _run_embedding_scan(
             org_id=org_id,
-            doc_a_text=doc_a_text,
-            doc_b_text=doc_b_text,
-            doc_a_id=doc_a_id,
-            doc_b_id=doc_b_id,
             doc_a_chunk_ids=doc_a_chunk_ids,
             doc_b_chunk_ids=doc_b_chunk_ids,
+            doc_a_id=doc_a_id,
+            doc_b_id=doc_b_id,
             metrics=metrics,
         )
-        return results, "structured"
-    else:
-        # Fall back to existing embedding-based scan
-        logger.info("Using embedding scan path (insufficient document structure)")
-        return [], "embedding"
-
-
+        return results, "embedding"
