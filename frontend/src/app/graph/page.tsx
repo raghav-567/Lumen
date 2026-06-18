@@ -7,8 +7,11 @@ import { Network, ZoomIn, ZoomOut, Maximize2, MousePointer, Info } from 'lucide-
 interface GraphNode {
   id: string;
   name: string;
-  type: string;
+  type: string;          // always "DOCUMENT" now
   label: string;
+  drift_score?: number;
+  factual_drift?: number;
+  semantic_drift?: number;
   x?: number;
   y?: number;
   vx?: number;
@@ -21,6 +24,9 @@ interface GraphLink {
   target: string | GraphNode;
   relation: string;
   confidence: number;
+  weight?: number;             // # of contradicting claim pairs between the two docs
+  avg_confidence?: number;
+  types?: Record<string, number>;
 }
 
 interface GraphData {
@@ -28,22 +34,50 @@ interface GraphData {
   links: GraphLink[];
 }
 
-const TYPE_COLORS: Record<string, string> = {
-  PERSON: '#a78bfa',
-  ORGANIZATION: '#60a5fa',
-  POLICY: '#fbbf24',
-  CONCEPT: '#34d399',
-  TECHNOLOGY: '#22d3ee',
-  REGULATION: '#f87171',
-  OTHER: '#9ca3af',
-};
+// Severity scale (DESIGN.md): desaturated cool → warm, drift 0–80+.
+// none #4A8C6F · low #B8A53D · medium #C8782E · high #C0392B.
+const SEV_STOPS: [number, [number, number, number]][] = [
+  [0, [74, 140, 111]],
+  [30, [184, 165, 61]],
+  [55, [200, 120, 46]],
+  [80, [192, 57, 43]],
+];
+const EDGE = '192, 57, 43'; // --sev-high, the contradiction colour
+
+function driftRGB(drift: number | undefined): [number, number, number] {
+  const d = Math.max(0, Math.min(80, drift ?? 0));
+  let lo = SEV_STOPS[0], hi = SEV_STOPS[SEV_STOPS.length - 1];
+  for (let i = 0; i < SEV_STOPS.length - 1; i++) {
+    if (d >= SEV_STOPS[i][0] && d <= SEV_STOPS[i + 1][0]) { lo = SEV_STOPS[i]; hi = SEV_STOPS[i + 1]; break; }
+  }
+  const span = (hi[0] - lo[0]) || 1;
+  const t = (d - lo[0]) / span;
+  return lo[1].map((v, j) => Math.round(v + (hi[1][j] - v) * t)) as [number, number, number];
+}
+function driftColor(drift: number | undefined): string {
+  const [r, g, b] = driftRGB(drift);
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+// Node radius scales with drift so the most-drifted docs draw the eye.
+function driftRadius(drift: number | undefined): number {
+  return 9 + Math.min(drift ?? 0, 100) * 0.18; // ~9 (cool) → ~27 (hot)
+}
+
+// Edge thickness scales with the number of contradicting claim pairs.
+function edgeWidth(weight: number | undefined): number {
+  return Math.min(1.5 + (weight ?? 1) * 0.7, 10);
+}
 
 export default function GraphPage() {
   const [graphData, setGraphData] = useState<GraphData>({ nodes: [], links: [] });
   const [loading, setLoading] = useState(true);
   const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
+  const [hoveredLink, setHoveredLink] = useState<GraphLink | null>(null);
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+  const linksRef = useRef<GraphLink[]>([]);
+  const hoveredLinkRef = useRef<GraphLink | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animFrameRef = useRef<number>(0);
   const zoomRef = useRef(1);
@@ -94,8 +128,26 @@ export default function GraphPage() {
       const n = nodes[i];
       const dx = gx - n.x!;
       const dy = gy - n.y!;
-      const r = 8 + (n.connections || 0) * 1.5;
+      const r = driftRadius(n.drift_score);
       if (dx * dx + dy * dy <= (r + 6) * (r + 6)) return n;
+    }
+    return null;
+  }, []);
+
+  // Find a contradiction edge near graph coordinates (point-to-segment distance)
+  const findLinkAt = useCallback((gx: number, gy: number): GraphLink | null => {
+    const nodeMap = nodeMapRef.current;
+    for (const link of linksRef.current) {
+      const s = nodeMap.get(typeof link.source === 'string' ? link.source : link.source.id);
+      const t = nodeMap.get(typeof link.target === 'string' ? link.target : link.target.id);
+      if (!s || !t) continue;
+      const dx = t.x! - s.x!, dy = t.y! - s.y!;
+      const len2 = dx * dx + dy * dy || 1;
+      let u = ((gx - s.x!) * dx + (gy - s.y!) * dy) / len2;
+      u = Math.max(0, Math.min(1, u));
+      const px = s.x! + u * dx, py = s.y! + u * dy;
+      const dist = Math.hypot(gx - px, gy - py);
+      if (dist <= edgeWidth(link.weight) / 2 + 6) return link;
     }
     return null;
   }, []);
@@ -142,10 +194,13 @@ export default function GraphPage() {
     const { x: gx, y: gy } = screenToGraph(sx, sy);
     const node = findNodeAt(gx, gy);
     setHoveredNode(node);
+    const link = node ? null : findLinkAt(gx, gy);
+    hoveredLinkRef.current = link;
+    setHoveredLink(link);
     if (canvasRef.current) {
-      canvasRef.current.style.cursor = node ? 'pointer' : 'grab';
+      canvasRef.current.style.cursor = node || link ? 'pointer' : 'grab';
     }
-  }, [screenToGraph, findNodeAt]);
+  }, [screenToGraph, findNodeAt, findLinkAt]);
 
   const handleMouseUp = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     if (dragNodeRef.current) {
@@ -209,6 +264,7 @@ export default function GraphPage() {
 
     nodesRef.current = nodes;
     nodeMapRef.current = nodeMap;
+    linksRef.current = graphData.links;
 
     // Center the view
     panRef.current = { x: 0, y: 0 };
@@ -275,52 +331,31 @@ export default function GraphPage() {
 
       const time = Date.now();
 
-      // Draw links
+      // Draw links — every edge is an inter-document CONTRADICTS relationship.
       for (const link of graphData.links) {
         const source = nodeMap.get(typeof link.source === 'string' ? link.source : link.source.id);
         const target = nodeMap.get(typeof link.target === 'string' ? link.target : link.target.id);
         if (!source || !target) continue;
 
-        const isContradiction = link.relation === 'CONTRADICTS';
-        const isHighlighted = selId && (
+        const touchesSel = selId && (
           (typeof link.source === 'string' ? link.source : link.source.id) === selId ||
           (typeof link.target === 'string' ? link.target : link.target.id) === selId
         );
+        const isHovered = link === hoveredLinkRef.current;
+        const dimmed = (selId && !touchesSel) ? true : false;
+        const w = edgeWidth(link.weight);
 
-        const dimmed = selId && !isHighlighted;
-
-        // Link line
+        // Link line — thickness scales with the # of contradicting claims (weight)
         ctx.beginPath();
         ctx.moveTo(source.x!, source.y!);
         ctx.lineTo(target.x!, target.y!);
-
-        if (isContradiction) {
-          ctx.strokeStyle = dimmed ? 'rgba(239, 68, 68, 0.08)' : 'rgba(239, 68, 68, 0.5)';
-          ctx.lineWidth = dimmed ? 1 : 2.5;
-          ctx.setLineDash([6, 4]);
-        } else {
-          ctx.strokeStyle = dimmed ? 'rgba(255,255,255,0.02)' : (isHighlighted ? 'rgba(124, 92, 252, 0.3)' : 'rgba(255,255,255,0.06)');
-          ctx.lineWidth = isHighlighted ? 1.5 : 0.8;
-          ctx.setLineDash([]);
-        }
+        ctx.strokeStyle = dimmed
+          ? `rgba(${EDGE}, 0.10)`
+          : (isHovered || touchesSel ? `rgba(${EDGE}, 0.95)` : `rgba(${EDGE}, 0.5)`);
+        ctx.lineWidth = dimmed ? Math.min(w, 1.5) : w;
+        ctx.setLineDash([6, 4]);
         ctx.stroke();
         ctx.setLineDash([]);
-
-        // Arrow
-        if (!dimmed) {
-          const angle = Math.atan2(target.y! - source.y!, target.x! - source.x!);
-          const tr = 8 + (target.connections || 0) * 1.5;
-          const ax = target.x! - Math.cos(angle) * (tr + 4);
-          const ay = target.y! - Math.sin(angle) * (tr + 4);
-          const arrowSize = isContradiction ? 6 : 4;
-          ctx.beginPath();
-          ctx.moveTo(ax, ay);
-          ctx.lineTo(ax - arrowSize * Math.cos(angle - 0.4), ay - arrowSize * Math.sin(angle - 0.4));
-          ctx.lineTo(ax - arrowSize * Math.cos(angle + 0.4), ay - arrowSize * Math.sin(angle + 0.4));
-          ctx.closePath();
-          ctx.fillStyle = isContradiction ? 'rgba(239, 68, 68, 0.6)' : 'rgba(255,255,255,0.15)';
-          ctx.fill();
-        }
 
         // Animated particle
         if (!dimmed) {
@@ -328,38 +363,32 @@ export default function GraphPage() {
           const px = source.x! + (target.x! - source.x!) * t;
           const py = source.y! + (target.y! - source.y!) * t;
           ctx.beginPath();
-          ctx.arc(px, py, isContradiction ? 2.5 : 1.5, 0, Math.PI * 2);
-          ctx.fillStyle = isContradiction ? 'rgba(239, 68, 68, 0.9)' : 'rgba(124, 92, 252, 0.3)';
+          ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(${EDGE}, 0.95)`;
           ctx.fill();
         }
 
-        // Relation label
+        // Edge label — number of contradicting claims (light chip, severity text)
         if (!dimmed && zoom > 0.6) {
           const mx = (source.x! + target.x!) / 2;
           const my = (source.y! + target.y!) / 2;
-          const label = link.relation.replace(/_/g, ' ');
-
-          ctx.font = isContradiction ? 'bold 9px system-ui' : '8px system-ui';
-          ctx.fillStyle = isContradiction ? 'rgba(239, 68, 68, 0.85)' : 'rgba(255,255,255,0.22)';
+          const label = `${link.weight ?? 1} claim${(link.weight ?? 1) === 1 ? '' : 's'}`;
+          ctx.font = '600 9px "Schibsted Grotesk", system-ui';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-
-          // Background for readability
-          if (isContradiction || isHighlighted) {
-            const tw = ctx.measureText(label).width + 8;
-            ctx.fillStyle = 'rgba(10, 10, 15, 0.7)';
-            ctx.fillRect(mx - tw / 2, my - 7, tw, 14);
-            ctx.fillStyle = isContradiction ? 'rgba(239, 68, 68, 0.9)' : 'rgba(124, 92, 252, 0.7)';
-          }
-
+          const tw = ctx.measureText(label).width + 10;
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.92)';
+          ctx.fillRect(mx - tw / 2, my - 8, tw, 16);
+          ctx.fillStyle = `rgba(${EDGE}, 1)`;
           ctx.fillText(label, mx, my);
         }
       }
 
-      // Draw nodes
+      // Draw nodes — documents, colored & sized by drift score.
       for (const node of nodes) {
-        const color = TYPE_COLORS[node.type] || TYPE_COLORS.OTHER;
-        const baseR = 8 + (node.connections || 0) * 1.5;
+        const [nr, ng, nb] = driftRGB(node.drift_score);
+        const color = `rgb(${nr}, ${ng}, ${nb})`;
+        const baseR = driftRadius(node.drift_score);
         const isSelected = selId === node.id;
         const isConnected = selId && graphData.links.some(l => {
           const sId = typeof l.source === 'string' ? l.source : l.source.id;
@@ -372,27 +401,21 @@ export default function GraphPage() {
           ctx.globalAlpha = 0.15;
         }
 
-        // Pulsing glow for selected or contradiction-involved
-        const hasContradiction = graphData.links.some(l =>
-          l.relation === 'CONTRADICTS' && (
-            (typeof l.source === 'string' ? l.source : l.source.id) === node.id ||
-            (typeof l.target === 'string' ? l.target : l.target.id) === node.id
-          )
-        );
-
-        if (hasContradiction && !dimmed) {
-          const pulse = 0.3 + 0.15 * Math.sin(time / 400);
+        // Pulsing halo for high-drift documents (drift ≥ 60).
+        const isHot = (node.drift_score ?? 0) >= 60;
+        if (isHot && !dimmed) {
+          const pulse = 0.18 + 0.10 * Math.sin(time / 400);
           ctx.beginPath();
           ctx.arc(node.x!, node.y!, baseR + 10, 0, Math.PI * 2);
-          ctx.fillStyle = `rgba(239, 68, 68, ${pulse})`;
+          ctx.fillStyle = `rgba(${nr}, ${ng}, ${nb}, ${pulse})`;
           ctx.fill();
         }
 
-        // Outer glow
+        // Soft halo
         if (!dimmed) {
           ctx.beginPath();
           ctx.arc(node.x!, node.y!, baseR + 5, 0, Math.PI * 2);
-          ctx.fillStyle = `${color}18`;
+          ctx.fillStyle = `rgba(${nr}, ${ng}, ${nb}, 0.12)`;
           ctx.fill();
         }
 
@@ -403,23 +426,23 @@ export default function GraphPage() {
         ctx.fill();
 
         if (isSelected) {
-          ctx.strokeStyle = '#fff';
+          ctx.strokeStyle = '#1A1A18';
           ctx.lineWidth = 2.5;
           ctx.stroke();
         } else {
-          ctx.strokeStyle = `${color}60`;
+          ctx.strokeStyle = `rgba(${nr}, ${ng}, ${nb}, 0.45)`;
           ctx.lineWidth = 1;
           ctx.stroke();
         }
 
-        // Label
+        // Label — near-black on the light canvas
         if (zoom > 0.5) {
-          ctx.font = `${isSelected ? 'bold ' : ''}${Math.round(10 / Math.max(zoom, 0.6))}px system-ui`;
-          ctx.fillStyle = dimmed ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.8)';
+          ctx.font = `${isSelected ? '600 ' : ''}${Math.round(11 / Math.max(zoom, 0.6))}px "Schibsted Grotesk", system-ui`;
+          ctx.fillStyle = dimmed ? 'rgba(26,26,24,0.25)' : 'rgba(26,26,24,0.85)';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'top';
           const label = node.label.length > 18 ? node.label.slice(0, 16) + '…' : node.label;
-          ctx.fillText(label, node.x!, node.y! + baseR + 6);
+          ctx.fillText(label, node.x!, node.y! + baseR + 7);
         }
 
         ctx.globalAlpha = 1;
@@ -453,20 +476,16 @@ export default function GraphPage() {
       <div style={{
         position: 'absolute', top: 16, left: 16, zIndex: 10,
         display: 'flex', alignItems: 'center', gap: 12, padding: '10px 18px',
-        background: 'rgba(18, 18, 26, 0.85)', backdropFilter: 'blur(12px)',
+        background: 'rgba(255, 255, 255, 0.88)', backdropFilter: 'blur(12px)', boxShadow: 'var(--shadow-md)',
         borderRadius: 14, border: '1px solid var(--border-subtle)',
       }}>
-        <Network size={18} style={{ color: 'var(--accent-indigo)' }} />
-        <span style={{ fontWeight: 700, fontSize: '0.95rem' }}>Knowledge Graph</span>
-        <span className="badge" style={{ background: 'rgba(124, 92, 252, 0.12)', color: 'var(--accent-indigo)' }}>
-          {graphData.nodes.length} NODES
-        </span>
-        <span className="badge" style={{ background: 'rgba(96, 165, 250, 0.12)', color: '#60a5fa' }}>
-          {graphData.links.length} LINKS
-        </span>
-        {graphData.links.filter(l => l.relation === 'CONTRADICTS').length > 0 && (
-          <span className="badge" style={{ background: 'rgba(239, 68, 68, 0.12)', color: '#ef4444' }}>
-            {graphData.links.filter(l => l.relation === 'CONTRADICTS').length} CONTRADICTIONS
+        <Network size={18} style={{ color: 'var(--text-secondary)' }} />
+        <span style={{ fontWeight: 600, fontSize: '0.95rem', letterSpacing: '-0.01em' }}>Contradiction Graph</span>
+        <span className="badge">{graphData.nodes.length} DOCS</span>
+        <span className="badge">{graphData.links.length} EDGES</span>
+        {graphData.links.length > 0 && (
+          <span className="badge" style={{ background: 'rgba(192, 57, 43, 0.10)', color: 'var(--sev-high)' }}>
+            {graphData.links.reduce((s, l) => s + (l.weight ?? 1), 0)} CONTRADICTIONS
           </span>
         )}
       </div>
@@ -493,24 +512,49 @@ export default function GraphPage() {
         </button>
       </div>
 
-      {/* Hover tooltip */}
+      {/* Node hover tooltip — drift breakdown */}
       {hoveredNode && !isDraggingRef.current && (
         <div style={{
           position: 'absolute',
           left: mousePos.x + 16, top: mousePos.y - 10,
           zIndex: 20, pointerEvents: 'none',
           padding: '8px 14px',
-          background: 'rgba(18, 18, 26, 0.92)', backdropFilter: 'blur(8px)',
+          background: 'rgba(255, 255, 255, 0.92)', backdropFilter: 'blur(8px)', boxShadow: 'var(--shadow-md)',
           borderRadius: 10, border: '1px solid var(--border-default)',
           maxWidth: 280,
         }}>
           <div style={{ fontWeight: 700, fontSize: '0.85rem', marginBottom: 2 }}>{hoveredNode.name}</div>
-          <div style={{ fontSize: '0.72rem', color: TYPE_COLORS[hoveredNode.type] || '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-            {hoveredNode.type}
+          <div style={{ fontSize: '0.72rem', color: driftColor(hoveredNode.drift_score), fontWeight: 600 }}>
+            Drift {(hoveredNode.drift_score ?? 0).toFixed(1)}
           </div>
           <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: 4 }}>
-            {hoveredNode.connections || 0} connections · Click to highlight
+            factual {(hoveredNode.factual_drift ?? 0).toFixed(1)} · semantic {(hoveredNode.semantic_drift ?? 0).toFixed(1)} · {hoveredNode.connections || 0} contradicting docs
           </div>
+        </div>
+      )}
+
+      {/* Edge hover tooltip — contradiction detail */}
+      {hoveredLink && !hoveredNode && !isDraggingRef.current && (
+        <div style={{
+          position: 'absolute',
+          left: mousePos.x + 16, top: mousePos.y - 10,
+          zIndex: 20, pointerEvents: 'none',
+          padding: '8px 14px',
+          background: 'rgba(255, 255, 255, 0.92)', backdropFilter: 'blur(8px)', boxShadow: 'var(--shadow-md)',
+          borderRadius: 10, border: '1px solid rgba(192,57,43,0.35)',
+          maxWidth: 300,
+        }}>
+          <div style={{ fontWeight: 600, fontSize: '0.85rem', color: 'var(--sev-high)', marginBottom: 2 }}>
+            {hoveredLink.weight ?? 1} contradicting claim{(hoveredLink.weight ?? 1) === 1 ? '' : 's'}
+          </div>
+          <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+            max confidence {((hoveredLink.confidence ?? 0) * 100).toFixed(0)}% · avg {((hoveredLink.avg_confidence ?? 0) * 100).toFixed(0)}%
+          </div>
+          {hoveredLink.types && Object.keys(hoveredLink.types).length > 0 && (
+            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: 4 }}>
+              {Object.entries(hoveredLink.types).map(([t, c]) => `${t.replace(/_/g, ' ')} ×${c}`).join(', ')}
+            </div>
+          )}
         </div>
       )}
 
@@ -519,29 +563,41 @@ export default function GraphPage() {
         <div style={{
           position: 'absolute', bottom: 16, right: 16, zIndex: 10,
           width: 320, padding: '16px 20px',
-          background: 'rgba(18, 18, 26, 0.92)', backdropFilter: 'blur(12px)',
+          background: 'rgba(255, 255, 255, 0.92)', backdropFilter: 'blur(12px)', boxShadow: 'var(--shadow-md)',
           borderRadius: 14, border: '1px solid var(--border-default)',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
             <div style={{
               width: 12, height: 12, borderRadius: '50%',
-              background: TYPE_COLORS[selectedNode.type] || '#9ca3af',
+              background: driftColor(selectedNode.drift_score),
             }} />
             <span style={{ fontWeight: 700, fontSize: '0.95rem' }}>{selectedNode.name}</span>
           </div>
-          <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 12 }}>
-            {selectedNode.type} · {selectedNode.connections || 0} connections
+          {/* Drift breakdown */}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+            {[
+              { label: 'Total', val: selectedNode.drift_score, color: driftColor(selectedNode.drift_score) },
+              { label: 'Factual', val: selectedNode.factual_drift, color: 'var(--text-primary)' },
+              { label: 'Semantic', val: selectedNode.semantic_drift, color: 'var(--text-primary)' },
+            ].map(({ label, val, color }) => (
+              <div key={label} style={{
+                flex: 1, textAlign: 'center', padding: '6px 4px',
+                background: 'var(--bg-secondary)', borderRadius: 8, border: '1px solid var(--border-subtle)',
+              }}>
+                <div style={{ fontSize: '1.05rem', fontWeight: 700, color }}>{(val ?? 0).toFixed(1)}</div>
+                <div style={{ fontSize: '0.62rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{label}</div>
+              </div>
+            ))}
           </div>
           <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
             <div style={{ fontWeight: 600, marginBottom: 6, color: 'var(--text-muted)', textTransform: 'uppercase', fontSize: '0.68rem', letterSpacing: '0.06em' }}>
-              Relations
+              Contradicts ({getConnectedLinks().length})
             </div>
             {getConnectedLinks().slice(0, 8).map((link, i) => {
               const sId = typeof link.source === 'string' ? link.source : link.source.id;
               const tId = typeof link.target === 'string' ? link.target : link.target.id;
               const otherId = sId === selectedNode.id ? tId : sId;
               const otherNode = graphData.nodes.find(n => n.id === otherId);
-              const isContra = link.relation === 'CONTRADICTS';
               return (
                 <div key={i} style={{
                   display: 'flex', alignItems: 'center', gap: 6,
@@ -549,10 +605,9 @@ export default function GraphPage() {
                 }}>
                   <span style={{
                     fontSize: '0.68rem', fontWeight: 600, padding: '1px 6px', borderRadius: 4,
-                    background: isContra ? 'rgba(239,68,68,0.12)' : 'rgba(124,92,252,0.1)',
-                    color: isContra ? '#ef4444' : 'var(--accent-indigo)',
+                    background: 'rgba(192,57,43,0.10)', color: 'var(--sev-high)',
                   }}>
-                    {link.relation.replace(/_/g, ' ')}
+                    {link.weight ?? 1} claim{(link.weight ?? 1) === 1 ? '' : 's'}
                   </span>
                   <span style={{ color: 'var(--text-primary)', fontSize: '0.78rem' }}>
                     {otherNode?.name || otherId.slice(0, 8)}
@@ -575,23 +630,26 @@ export default function GraphPage() {
       {graphData.nodes.length > 0 && (
         <div style={{
           position: 'absolute', bottom: 16, left: 16, zIndex: 10,
-          padding: '10px 14px', background: 'rgba(18, 18, 26, 0.85)',
-          backdropFilter: 'blur(12px)', borderRadius: 12,
-          border: '1px solid var(--border-subtle)', fontSize: '0.72rem',
+          padding: '10px 14px', background: 'rgba(255, 255, 255, 0.88)',
+          backdropFilter: 'blur(12px)', borderRadius: 12, boxShadow: 'var(--shadow-md)',
+          border: '1px solid var(--border)', fontSize: '0.72rem',
           display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center',
         }}>
-          {Object.entries(TYPE_COLORS).filter(([type]) =>
-            graphData.nodes.some(n => n.type === type)
-          ).map(([type, color]) => (
-            <div key={type} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              <div style={{ width: 8, height: 8, borderRadius: '50%', background: color }} />
-              <span style={{ color: 'var(--text-muted)' }}>{type}</span>
+          <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>Drift</span>
+          {[
+            { label: 'low', d: 10 },
+            { label: 'med', d: 45 },
+            { label: 'high', d: 80 },
+          ].map(({ label, d }) => (
+            <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <div style={{ width: 8, height: 8, borderRadius: '50%', background: driftColor(d) }} />
+              <span style={{ color: 'var(--text-muted)' }}>{label}</span>
             </div>
           ))}
-          {graphData.links.some(l => l.relation === 'CONTRADICTS') && (
+          {graphData.links.length > 0 && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              <div style={{ width: 14, height: 2, background: '#ef4444', borderRadius: 2 }} />
-              <span style={{ color: '#ef4444', fontWeight: 600 }}>CONTRADICTS</span>
+              <div style={{ width: 14, height: 3, background: 'var(--sev-high)', borderRadius: 2 }} />
+              <span style={{ color: 'var(--sev-high)', fontWeight: 600 }}>contradicts (thicker = more)</span>
             </div>
           )}
         </div>
@@ -601,7 +659,7 @@ export default function GraphPage() {
       {loading ? (
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', flexDirection: 'column', gap: 12 }}>
           <div className="spinner" />
-          <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Loading knowledge graph…</span>
+          <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Loading contradiction graph…</span>
         </div>
       ) : graphData.nodes.length === 0 ? (
         <div style={{
@@ -610,17 +668,17 @@ export default function GraphPage() {
         }}>
           <div style={{
             width: 80, height: 80, borderRadius: 20,
-            background: 'rgba(124, 92, 252, 0.08)',
+            background: 'var(--bg-subtle)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
           }}>
             <Network size={36} style={{ color: 'var(--accent-indigo)', opacity: 0.5 }} />
           </div>
           <div style={{ textAlign: 'center' }}>
             <p style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>
-              No entities found
+              No documents yet
             </p>
             <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', maxWidth: 360, lineHeight: 1.6 }}>
-              Upload and process documents to build the knowledge graph. Entities, relationships, and contradictions will appear here automatically.
+              Upload documents to see the contradiction graph. Documents that contradict each other will be connected by red edges — thicker edges mean more contradicting claims.
             </p>
           </div>
           <div style={{
