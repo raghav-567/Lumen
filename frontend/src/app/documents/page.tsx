@@ -150,7 +150,7 @@ export default function DocumentsPage() {
                   <td style={{ fontWeight: 500 }}>
                     {doc.title}
                     {(doc as any).version_number > 1 && (
-                      <span className="badge" style={{ marginLeft: 6, fontSize: '0.6rem', background: 'rgba(124, 92, 252, 0.12)', color: 'var(--accent-indigo)' }}>
+                      <span className="badge" style={{ marginLeft: 6, fontSize: '0.6rem' }}>
                         v{(doc as any).version_number}
                       </span>
                     )}
