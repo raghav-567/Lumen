@@ -5,7 +5,7 @@ import { api } from '@/lib/api';
 import {
   Scale, ChevronDown, Check, X, Flag, Shuffle,
   GitBranch, AlertTriangle, RefreshCw, Loader2,
-  Eye, Sparkles, Clock, Beaker,
+  Eye, Sparkles, Beaker,
 } from 'lucide-react';
 
 interface ReviewItem {
@@ -104,16 +104,6 @@ export default function ReviewsPage() {
     }
   };
 
-  const getClassColor = (cls: string) => {
-    switch (cls) {
-      case 'contradictory': return 'var(--severity-critical)';
-      case 'supersedes': return 'var(--severity-high)';
-      case 'evolution': return 'var(--accent-blue)';
-      case 'consistent': return 'var(--accent-emerald)';
-      default: return 'var(--text-muted)';
-    }
-  };
-
   const timeAgo = (dateStr: string) => {
     const diff = Date.now() - new Date(dateStr).getTime();
     const mins = Math.floor(diff / 60000);
@@ -128,35 +118,13 @@ export default function ReviewsPage() {
       <div className="page-header">
         <div>
           <h1 className="page-title"><Scale size={24} /> Reviews</h1>
-          <p className="page-subtitle">{total} contradiction pairs found</p>
+          {stats && (
+            <p className="page-subtitle">
+              {stats.total_pairs} pairs · {stats.pending} pending · {stats.approved} approved · {(stats.review_rate * 100).toFixed(0)}% reviewed
+            </p>
+          )}
         </div>
       </div>
-
-      {/* Stats summary bar */}
-      {stats && (
-        <div className="review-stats-bar">
-          <div className="review-stat">
-            <span className="review-stat-value">{stats.total_pairs}</span>
-            <span className="review-stat-label">Total</span>
-          </div>
-          <div className="review-stat">
-            <span className="review-stat-value" style={{ color: 'var(--severity-high)' }}>{stats.pending}</span>
-            <span className="review-stat-label">Pending</span>
-          </div>
-          <div className="review-stat">
-            <span className="review-stat-value" style={{ color: 'var(--accent-emerald)' }}>{stats.approved}</span>
-            <span className="review-stat-label">Approved</span>
-          </div>
-          <div className="review-stat">
-            <span className="review-stat-value" style={{ color: 'var(--severity-critical)' }}>{stats.rejected}</span>
-            <span className="review-stat-label">Rejected</span>
-          </div>
-          <div className="review-stat">
-            <span className="review-stat-value">{(stats.review_rate * 100).toFixed(0)}%</span>
-            <span className="review-stat-label">Review Rate</span>
-          </div>
-        </div>
-      )}
 
       {/* Filter bar */}
       <div className="filter-bar">
@@ -182,57 +150,21 @@ export default function ReviewsPage() {
           {items.map((item, idx) => (
             <div key={item.id} className="review-card" style={{ animationDelay: `${idx * 40}ms` }}>
 
-              {/* Card header */}
+              {/* Card header — two tiers: the contradiction, then quiet meta */}
               <div
                 onClick={() => setExpandedId(expandedId === item.id ? null : item.id)}
-                style={{ display: 'flex', alignItems: 'flex-start', gap: 12, cursor: 'pointer' }}
+                style={{ display: 'flex', alignItems: 'center', gap: 16, cursor: 'pointer' }}
               >
-                {/* Classification badge */}
-                <span className="badge" style={{
-                  background: `color-mix(in srgb, ${getClassColor(item.classification)} 12%, transparent)`,
-                  color: getClassColor(item.classification),
-                }}>
-                  {item.classification || 'unknown'}
-                </span>
-
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <p style={{ fontWeight: 600, fontSize: '0.88rem', marginBottom: 4 }}>
+                  <p style={{ fontWeight: 600, fontSize: '0.95rem', marginBottom: 5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                     {item.doc_a_title} <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>vs</span> {item.doc_b_title}
                   </p>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.72rem', color: 'var(--text-muted)', flexWrap: 'wrap' }}>
-                    <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-                      <Clock size={10} /> {timeAgo(item.created_at)}
-                    </span>
-                    <span>·</span>
-                    <span>Conf: {((item.confidence || 0) * 100).toFixed(0)}%</span>
-                    {item.gate_similarity != null && (
-                      <><span>·</span><span>Sim: {item.gate_similarity.toFixed(3)}</span></>
-                    )}
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                    {item.classification || 'unknown'} · {timeAgo(item.created_at)} · {((item.confidence || 0) * 100).toFixed(0)}% confidence
                   </div>
                 </div>
 
-                {/* Meta badges */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                  {item.inferred_lineage && (
-                    <span className="meta-badge inferred">
-                      <GitBranch size={10} /> Inferred
-                    </span>
-                  )}
-                  {item.sampled && (
-                    <span className="meta-badge sampled">
-                      <Beaker size={10} /> Sampled
-                    </span>
-                  )}
-                  {!item.explanation_valid && item.explanation && (
-                    <span className="meta-badge stale">
-                      <AlertTriangle size={10} /> Stale
-                    </span>
-                  )}
-                  {item.is_temporal_evolution && !item.inferred_lineage && (
-                    <span className="meta-badge evolution">
-                      <Shuffle size={10} /> Evolution
-                    </span>
-                  )}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
                   <span className={`badge badge-${item.review_status?.toLowerCase()}`}>
                     {item.review_status}
                   </span>
@@ -246,6 +178,19 @@ export default function ReviewsPage() {
               {/* Expanded content */}
               {expandedId === item.id && (
                 <div style={{ marginTop: 16, animation: 'fadeInUp 300ms ease-out' }}>
+
+                  {/* Detection flags + signal (demoted from the header) */}
+                  {(item.inferred_lineage || item.sampled || (!item.explanation_valid && item.explanation) || (item.is_temporal_evolution && !item.inferred_lineage) || item.gate_similarity != null) && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
+                      {item.inferred_lineage && <span className="meta-badge inferred"><GitBranch size={10} /> Inferred</span>}
+                      {item.sampled && <span className="meta-badge sampled"><Beaker size={10} /> Sampled</span>}
+                      {!item.explanation_valid && item.explanation && <span className="meta-badge stale"><AlertTriangle size={10} /> Stale</span>}
+                      {item.is_temporal_evolution && !item.inferred_lineage && <span className="meta-badge evolution"><Shuffle size={10} /> Evolution</span>}
+                      {item.gate_similarity != null && (
+                        <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>similarity {item.gate_similarity.toFixed(3)}</span>
+                      )}
+                    </div>
+                  )}
 
                   {/* Claim comparison */}
                   <div style={{
