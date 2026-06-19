@@ -135,7 +135,7 @@ export default function AdminPage() {
         {/* ── Section 1: Gate Calibration ── */}
         <div className="admin-card">
           <div className="admin-card-header">
-            <div className="admin-card-icon" style={{ background: 'rgba(79, 143, 255, 0.12)', color: 'var(--accent-blue)' }}>
+            <div className="admin-card-icon">
               <Target size={20} />
             </div>
             <div>
@@ -207,7 +207,7 @@ export default function AdminPage() {
         {/* ── Section 2: Lineage Heuristic Stats ── */}
         <div className="admin-card">
           <div className="admin-card-header">
-            <div className="admin-card-icon" style={{ background: 'rgba(124, 92, 252, 0.12)', color: 'var(--accent-indigo)' }}>
+            <div className="admin-card-icon">
               <GitBranch size={20} />
             </div>
             <div>
@@ -272,7 +272,7 @@ export default function AdminPage() {
         {/* ── Section 3: Drift Weights Editor ── */}
         <div className="admin-card">
           <div className="admin-card-header">
-            <div className="admin-card-icon" style={{ background: 'rgba(16, 185, 129, 0.12)', color: 'var(--accent-emerald)' }}>
+            <div className="admin-card-icon">
               <Sliders size={20} />
             </div>
             <div>
@@ -280,7 +280,7 @@ export default function AdminPage() {
               <p className="admin-card-subtitle">
                 Per-org tuning of factual vs semantic drift balance
                 {weights?.source === 'custom' && (
-                  <span className="badge" style={{ marginLeft: 8, background: 'rgba(124, 92, 252, 0.12)', color: 'var(--accent-indigo)' }}>Custom</span>
+                  <span className="badge" style={{ marginLeft: 8 }}>Custom</span>
                 )}
                 {weights?.source === 'defaults' && (
                   <span className="badge" style={{ marginLeft: 8 }}>Defaults</span>
@@ -375,7 +375,7 @@ export default function AdminPage() {
         {/* ── Section 4: Task Status Monitor ── */}
         <div className="admin-card">
           <div className="admin-card-header">
-            <div className="admin-card-icon" style={{ background: 'rgba(245, 158, 11, 0.12)', color: 'var(--severity-high)' }}>
+            <div className="admin-card-icon">
               <Activity size={20} />
             </div>
             <div>
