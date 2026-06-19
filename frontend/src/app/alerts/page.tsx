@@ -3,8 +3,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import {
-  Bell, Check, CheckCircle2, XCircle, Eye,
-  Clock, ChevronDown, AlertTriangle,
+  Bell, Check, CheckCircle2, XCircle, Eye, ChevronDown,
 } from 'lucide-react';
 
 interface Alert {
@@ -68,7 +67,7 @@ export default function AlertsPage() {
   };
 
   return (
-    <div className="fade-in">
+    <div className="fade-in list-page">
       <div className="page-header">
         <h1 className="page-title"><Bell size={24} /> Alerts</h1>
         <p className="page-subtitle">{total} alerts found</p>
@@ -106,22 +105,16 @@ export default function AlertsPage() {
             >
               <div
                 onClick={() => setExpandedId(expandedId === alert.id ? null : alert.id)}
-                style={{ display: 'flex', alignItems: 'flex-start', gap: 12, cursor: 'pointer' }}
+                style={{ display: 'flex', alignItems: 'center', gap: 16, cursor: 'pointer' }}
               >
-                <span className={`badge badge-${alert.severity}`}>{alert.severity}</span>
+                {/* Severity is carried by the card's left border — no extra badge */}
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <p style={{ fontWeight: 600, marginBottom: 4, fontSize: '0.9rem' }}>{alert.title}</p>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                    <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                      <AlertTriangle size={11} /> {alert.alert_type.replace(/_/g, ' ')}
-                    </span>
-                    <span>·</span>
-                    <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                      <Clock size={11} /> {timeAgo(alert.created_at)}
-                    </span>
+                  <p style={{ fontWeight: 600, marginBottom: 5, fontSize: '0.95rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{alert.title}</p>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                    {alert.severity} · {alert.alert_type.replace(/_/g, ' ')} · {timeAgo(alert.created_at)}
                   </div>
                 </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
                   <span className={`badge badge-${alert.status}`}>{alert.status}</span>
                   <ChevronDown
                     size={16}
