@@ -96,7 +96,7 @@ export default function DocumentsPage() {
   };
 
   return (
-    <div className="fade-in">
+    <div className="fade-in list-page">
       <div className="page-header">
         <div>
           <h1 className="page-title"><FileText size={24} /> Documents</h1>

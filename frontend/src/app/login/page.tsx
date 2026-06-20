@@ -111,15 +111,17 @@ export default function LoginPage() {
                 onChange={(e) => setPassword(e.target.value)}
                 required
                 minLength={8}
-                style={{ paddingRight: 44 }}
+                style={{ paddingRight: 38 }}
               />
               <button
                 type="button"
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
                 onClick={() => setShowPassword(!showPassword)}
                 style={{
                   position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
                   background: 'none', border: 'none', color: 'var(--text-muted)',
-                  cursor: 'pointer', padding: 4, pointerEvents: 'auto',
+                  cursor: 'pointer', padding: 4,
                 }}
               >
                 {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
