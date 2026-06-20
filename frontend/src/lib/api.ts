@@ -45,7 +45,11 @@ class ApiClient {
       headers,
     });
 
-    if (res.status === 401) {
+    // A 401 on a normal request means an expired/invalid session — clear it and
+    // bounce to login. But a 401 from the auth endpoints themselves is just bad
+    // credentials: let it fall through so the login page can show the error
+    // inline instead of hard-redirecting (which wiped the message).
+    if (res.status === 401 && !path.startsWith('/auth/')) {
       this.clearToken();
       if (typeof window !== 'undefined') {
         window.location.href = '/login';
@@ -68,26 +72,20 @@ class ApiClient {
   // ── Auth ─────────────────────────────────────────────
 
   async register(data: { email: string; password: string; full_name: string; org_name: string }) {
-    const res = await this.request<{ access_token: string; refresh_token: string }>('/auth/register', {
+    const res = await this.request<{ access_token: string; token_type: string }>('/auth/register', {
       method: 'POST',
       body: JSON.stringify(data),
     });
     this.setToken(res.access_token);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('refresh_token', res.refresh_token);
-    }
     return res;
   }
 
   async login(data: { email: string; password: string }) {
-    const res = await this.request<{ access_token: string; refresh_token: string }>('/auth/login', {
+    const res = await this.request<{ access_token: string; token_type: string }>('/auth/login', {
       method: 'POST',
       body: JSON.stringify(data),
     });
     this.setToken(res.access_token);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('refresh_token', res.refresh_token);
-    }
     return res;
   }
 
