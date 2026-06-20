@@ -62,10 +62,14 @@ export default function AdminPage() {
     setSaveSuccess(false);
     try {
       await api.updateDriftWeights(editWeights);
+      // Persisting alone does not change any existing drift score — the scorer
+      // reads these weights only on the next recalc. Trigger one so the new
+      // weights are actually applied to the current documents.
+      await api.triggerDriftScan();
       const w = await api.getDriftWeights();
       setWeights(w);
       setSaveSuccess(true);
-      setTimeout(() => setSaveSuccess(false), 3000);
+      setTimeout(() => setSaveSuccess(false), 4000);
     } catch (err: any) {
       alert(`Save failed: ${err.message}`);
     } finally {
@@ -326,17 +330,19 @@ export default function AdminPage() {
                 </span>
               </div>
 
+              {/* Factual + semantic must sum to 1.0, so the two sliders are
+                  complementary — moving one sets the other automatically. */}
               <WeightSlider
                 label="Factual Weight"
                 description="Factual drift contribution to combined score"
                 value={editWeights.factual_weight}
-                onChange={(v) => setEditWeights(p => ({ ...p, factual_weight: v }))}
+                onChange={(v) => setEditWeights(p => ({ ...p, factual_weight: v, semantic_weight: Math.round((1 - v) * 100) / 100 }))}
               />
               <WeightSlider
                 label="Semantic Weight"
                 description="Semantic drift contribution to combined score"
                 value={editWeights.semantic_weight}
-                onChange={(v) => setEditWeights(p => ({ ...p, semantic_weight: v }))}
+                onChange={(v) => setEditWeights(p => ({ ...p, semantic_weight: v, factual_weight: Math.round((1 - v) * 100) / 100 }))}
               />
             </div>
 
@@ -359,7 +365,14 @@ export default function AdminPage() {
               </button>
               {saveSuccess && (
                 <span style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--accent-emerald)', fontSize: '0.82rem' }}>
-                  <CheckCircle2 size={14} /> Saved
+                  <CheckCircle2 size={14} /> Saved — recalculating drift scores…
+                </span>
+              )}
+              {!saving && !saveSuccess && (!subValid || !blendValid) && (
+                <span style={{ color: 'var(--severity-high)', fontSize: '0.82rem' }}>
+                  {!subValid
+                    ? `Density + Confidence + Volume must sum to 1.00 (currently ${subSignalSum.toFixed(2)})`
+                    : `Factual + Semantic must sum to 1.00 (currently ${blendSum.toFixed(2)})`}
                 </span>
               )}
             </div>
