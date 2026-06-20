@@ -154,6 +154,29 @@ export default function LoginPage() {
           </button>
         </form>
 
+        {process.env.NEXT_PUBLIC_DEMO_MODE === 'true' && (
+          <div style={{
+            marginTop: 'var(--space-lg)', padding: '10px 14px',
+            background: 'var(--surface-2, rgba(0,0,0,0.03))',
+            border: '1px solid var(--border, rgba(0,0,0,0.08))',
+            borderRadius: 'var(--radius-sm)', fontSize: '0.78rem', color: 'var(--text-secondary)',
+          }}>
+            <strong style={{ color: 'var(--text-primary)' }}>Demo mode</strong> — sample data, no
+            backend. Any credentials sign in.
+            <button
+              type="button"
+              onClick={() => { setEmail('admin@knowledgedrift.dev'); setPassword('demo-Admin-123'); }}
+              style={{
+                display: 'block', marginTop: 6, background: 'none', border: 'none', padding: 0,
+                color: 'var(--accent-blue)', cursor: 'pointer', fontFamily: 'inherit',
+                fontSize: 'inherit', fontWeight: 600,
+              }}
+            >
+              Fill demo credentials →
+            </button>
+          </div>
+        )}
+
         <p style={{
           textAlign: 'center', marginTop: 'var(--space-xl)',
           fontSize: '0.82rem', color: 'var(--text-muted)',

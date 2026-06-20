@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import '@/styles/globals.css';
+import DemoBanner from '@/components/DemoBanner';
 
 export const metadata: Metadata = {
   title: 'KnowledgeDrift — AI Knowledge Drift Detection',
@@ -22,7 +23,10 @@ export default function RootLayout({
           rel="stylesheet"
         />
       </head>
-      <body>{children}</body>
+      <body>
+        {children}
+        <DemoBanner />
+      </body>
     </html>
   );
 }
