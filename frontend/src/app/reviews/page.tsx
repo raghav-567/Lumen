@@ -114,7 +114,7 @@ export default function ReviewsPage() {
   };
 
   return (
-    <div className="fade-in">
+    <div className="fade-in list-page">
       <div className="page-header">
         <div>
           <h1 className="page-title"><Scale size={24} /> Reviews</h1>
