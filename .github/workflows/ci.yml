@@ -51,4 +51,4 @@ jobs:
           SECRET_KEY: test-secret
         run: |
           cd backend
-          python -m pytest ../tests -v
+          python -m pytest tests -v
