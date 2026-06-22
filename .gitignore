@@ -32,8 +32,9 @@ Thumbs.db
 node_modules/
 .next/
 out/
+*.tsbuildinfo
 
-# Docker
+# Logs
 *.log
 
 # Data
@@ -44,3 +45,7 @@ data/chroma/
 .pytest_cache/
 htmlcov/
 .coverage
+
+# Scratch / ad-hoc test files
+test_doc*.txt
+
