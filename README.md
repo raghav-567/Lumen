@@ -10,8 +10,7 @@ scores per-document drift, and renders the result as an interactive document-con
 
 ## Demo
 
-- **Walkthrough video:** _(placeholder — add link)_
-- **Live frontend:** _(placeholder — not deployed yet)_
+- **Live frontend:** (https://knowledgedrift.vercel.app/)
 
 ![Document-contradiction graph](docs/images/graph.png)
 
@@ -162,6 +161,24 @@ On a fresh database it produces:
 The three documents state the same fourteen policy parameters with deliberately far-apart values,
 so every cross-document pair on a shared parameter is a genuine contradiction — a constructed
 demonstration set with ground truth known by construction, not a held-out benchmark.
+
+## Deploying the frontend to Vercel (demo mode)
+
+The frontend can be deployed standalone — no backend — using a bundled snapshot of the seeded
+demo org. When `NEXT_PUBLIC_DEMO_MODE=true`, the API client serves fixtures
+(`frontend/src/lib/demoData.ts`) instead of calling the backend, so every page is interactive
+and any credentials sign in.
+
+In the Vercel project settings:
+
+- **Root Directory:** `frontend`
+- **Environment variable:** `NEXT_PUBLIC_DEMO_MODE=true`
+- Framework preset (Next.js) and build/output settings are auto-detected.
+
+Leave `NEXT_PUBLIC_DEMO_MODE` unset for normal local development against the real backend
+(`NEXT_PUBLIC_API_URL`, default `http://localhost:8000/api/v1`). To point a deployment at a real
+hosted backend instead of demo mode, set `NEXT_PUBLIC_API_URL` to its URL and lock the backend's
+`FRONTEND_ORIGIN` to the Vercel domain.
 
 ## Running the tests
 
