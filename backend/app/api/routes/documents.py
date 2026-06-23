@@ -14,9 +14,10 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Query
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, forbid_viewer
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.ratelimit import rate_limit
 from app.models.models import Document, FileType, User
 from app.schemas.schemas import DocumentListResponse, DocumentResponse
 
@@ -39,10 +40,14 @@ EXTENSION_MAP = {
 }
 
 
-@router.post("/upload", status_code=201)
+@router.post(
+    "/upload",
+    status_code=201,
+    dependencies=[Depends(rate_limit(settings.UPLOAD_RATE_LIMIT))],
+)
 async def upload_document(
     file: UploadFile = File(...),
-    user: User = Depends(get_current_user),
+    user: User = Depends(forbid_viewer),
     db: AsyncSession = Depends(get_db),
 ):
     import hashlib
@@ -202,7 +207,7 @@ async def get_document(
 @router.delete("/{document_id}", status_code=204)
 async def delete_document(
     document_id: str,
-    user: User = Depends(get_current_user),
+    user: User = Depends(forbid_viewer),
     db: AsyncSession = Depends(get_db),
 ):
     from datetime import datetime, timezone
@@ -218,13 +223,38 @@ async def delete_document(
         raise HTTPException(status_code=404, detail="Document not found")
 
     doc.deleted_at = datetime.now(timezone.utc)
+
+    # Remove contradiction pairs derived from this document so they no longer
+    # inflate any document's drift score (P0).
+    from app.models.models import Chunk, ContradictionPair
+    chunk_rows = await db.execute(select(Chunk.id).where(Chunk.document_id == document_id))
+    chunk_ids = [row[0] for row in chunk_rows.all()]
+    if chunk_ids:
+        from sqlalchemy import delete as sa_delete, or_
+        await db.execute(
+            sa_delete(ContradictionPair).where(
+                or_(
+                    ContradictionPair.chunk_a_id.in_(chunk_ids),
+                    ContradictionPair.chunk_b_id.in_(chunk_ids),
+                )
+            )
+        )
+
     await db.commit()
+
+    # Purge this document's vectors so a deleted doc can no longer be retrieved
+    # or mis-attributed as a contradiction partner (P0).
+    try:
+        from app.ingestion.indexer import delete_by_document
+        delete_by_document(str(user.org_id), str(document_id))
+    except Exception as e:
+        logger.warning(f"Vector purge failed for deleted doc {document_id}: {e}")
 
 
 @router.patch("/{document_id}")
 async def update_document_metadata(
     document_id: str,
-    user: User = Depends(get_current_user),
+    user: User = Depends(forbid_viewer),
     db: AsyncSession = Depends(get_db),
     authority_level: int | None = None,
     owner_department: str | None = None,
@@ -284,7 +314,7 @@ async def update_document_metadata(
 @router.post("/{document_id}/retry")
 async def retry_failed_document(
     document_id: str,
-    user: User = Depends(get_current_user),
+    user: User = Depends(forbid_viewer),
     db: AsyncSession = Depends(get_db),
 ):
     """Retry processing a failed/partial document."""

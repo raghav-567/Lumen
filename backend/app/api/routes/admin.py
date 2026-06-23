@@ -12,17 +12,18 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select, func, case, and_
 
 from app.core.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_admin
 from app.models.models import ContradictionPair, User, ContradictionClassification, HeuristicFeedback
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/admin", tags=["Admin"])
+# Every admin endpoint requires the ADMIN role (enforced at the router level)
+# and is scoped to the caller's own org — no caller-supplied org override.
+router = APIRouter(prefix="/admin", tags=["Admin"], dependencies=[Depends(require_admin)])
 
 
 @router.get("/gate-calibration")
 async def gate_calibration(
-    org_id: str | None = None,
     session=Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -35,7 +36,7 @@ async def gate_calibration(
         - Similarity distribution of sampled contradictions
         - Recommended threshold adjustment
     """
-    target_org = org_id or str(current_user.org_id)
+    target_org = str(current_user.org_id)
 
     # Count all sampled pairs
     total_sampled = (await session.execute(
@@ -139,7 +140,6 @@ async def gate_calibration(
 
 @router.get("/lineage-heuristic-stats")
 async def lineage_heuristic_stats(
-    org_id: str | None = None,
     session=Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -151,7 +151,7 @@ async def lineage_heuristic_stats(
         - Override rate (how often reviewers disagreed with the heuristic)
         - Average title_similarity and date_gap for confirmed vs overridden
     """
-    target_org = org_id or str(current_user.org_id)
+    target_org = str(current_user.org_id)
 
     # Total inferred lineage pairs
     total_inferred = (await session.execute(
@@ -276,14 +276,13 @@ async def get_task_status(
 
 @router.get("/drift-weights")
 async def get_drift_weights(
-    org_id: str | None = None,
     session=Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Get current drift scoring weights for the org."""
+    """Get current drift scoring weights for the caller's org."""
     from app.models.models import OrgDriftWeights
 
-    target_org = org_id or str(current_user.org_id)
+    target_org = str(current_user.org_id)
     result = await session.execute(
         select(OrgDriftWeights).where(OrgDriftWeights.org_id == target_org)
     )
@@ -323,7 +322,8 @@ async def update_drift_weights(
     from fastapi import HTTPException
     import uuid
 
-    target_org = body.get("org_id") or str(current_user.org_id)
+    # Always the caller's own org — ignore any org_id supplied in the body.
+    target_org = str(current_user.org_id)
 
     # Extract weights with defaults
     density = body.get("density_weight", 0.45)

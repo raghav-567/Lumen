@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from app.core.database import get_db
 from app.core.security import decode_token
-from app.models.models import User
+from app.models.models import User, UserRole
 
 security_scheme = HTTPBearer()
 
@@ -33,4 +33,24 @@ async def get_current_user(
     if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
 
+    return user
+
+
+async def require_admin(user: User = Depends(get_current_user)) -> User:
+    """Allow only ADMIN users. Use for calibration / drift-weights / metrics."""
+    if user.role != UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin role required",
+        )
+    return user
+
+
+async def forbid_viewer(user: User = Depends(get_current_user)) -> User:
+    """Block read-only VIEWER users from mutating endpoints (ADMIN/MEMBER pass)."""
+    if user.role == UserRole.VIEWER:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This action requires write access (VIEWER is read-only)",
+        )
     return user

@@ -6,9 +6,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, forbid_viewer
+from app.core.config import settings
 from app.core.database import get_db
-from app.models.models import Document, Entity, Relation, User, ContradictionPair
+from app.core.ratelimit import rate_limit
+from app.models.models import Document, Entity, Relation, User, ContradictionPair, Claim, Chunk
 from app.schemas.schemas import (
     DriftScoreResponse,
     DriftScoresListResponse,
@@ -16,6 +18,82 @@ from app.schemas.schemas import (
 )
 
 router = APIRouter()
+
+
+def build_document_contradiction_graph(documents, pairs, claim_to_doc, chunk_to_doc):
+    """Assemble a document-contradiction graph from data we already have.
+
+    Nodes = live documents. Edges = one per unordered document pair that shares ≥1
+    contradiction, weighted by the number of claim-grain ContradictionPairs between
+    the two docs. Pure function (no DB) so it can be unit-tested directly.
+
+    Args:
+        documents: iterable of Document ORM rows (already filtered to live + org).
+        pairs: iterable of ContradictionPair rows for the org.
+        claim_to_doc: {str(claim_id): str(document_id)} for live docs.
+        chunk_to_doc: {str(chunk_id): str(document_id)} for live docs (fallback path).
+
+    Returns:
+        (nodes, links) as lists of plain dicts matching GraphVisualizationResponse.
+    """
+    from collections import defaultdict
+
+    live_doc_ids = {str(d.id) for d in documents}
+
+    nodes = [
+        {
+            "id": str(d.id),
+            "name": d.title or d.filename,
+            "type": "DOCUMENT",
+            "label": d.title or d.filename,
+            "drift_score": d.drift_score or 0.0,
+            "factual_drift": d.factual_drift_score or 0.0,
+            "semantic_drift": d.semantic_drift_score or 0.0,
+        }
+        for d in documents
+    ]
+
+    def _resolve_doc(claim_id, chunk_id):
+        # Prefer the direct claim→document path (claim-grain); fall back to chunk.
+        if claim_id is not None:
+            did = claim_to_doc.get(str(claim_id))
+            if did:
+                return did
+        if chunk_id is not None:
+            return chunk_to_doc.get(str(chunk_id))
+        return None
+
+    groups: dict = defaultdict(lambda: {"weight": 0, "max": 0.0, "sum": 0.0, "types": defaultdict(int)})
+    for p in pairs:
+        doc_a = _resolve_doc(p.claim_a_id, p.chunk_a_id)
+        doc_b = _resolve_doc(p.claim_b_id, p.chunk_b_id)
+        if not doc_a or not doc_b or doc_a == doc_b:
+            continue  # unresolved or self-pair
+        if doc_a not in live_doc_ids or doc_b not in live_doc_ids:
+            continue  # defensive: skip pairs touching deleted docs (post-P0 shouldn't happen)
+        key = tuple(sorted((doc_a, doc_b)))
+        g = groups[key]
+        conf = p.confidence or 0.0
+        g["weight"] += 1
+        g["max"] = max(g["max"], conf)
+        g["sum"] += conf
+        if p.contradiction_type:
+            g["types"][p.contradiction_type] += 1
+
+    links = [
+        {
+            "source": a,
+            "target": b,
+            "relation": "CONTRADICTS",
+            "confidence": round(g["max"], 4),
+            "weight": g["weight"],
+            "avg_confidence": round(g["sum"] / g["weight"], 4),
+            "types": dict(g["types"]),
+        }
+        for (a, b), g in groups.items()
+    ]
+
+    return nodes, links
 
 
 @router.get("/drift/scores", response_model=DriftScoresListResponse)
@@ -46,9 +124,13 @@ async def get_drift_scores(
     return DriftScoresListResponse(scores=scores)
 
 
-@router.post("/drift/scan", status_code=202)
+@router.post(
+    "/drift/scan",
+    status_code=202,
+    dependencies=[Depends(rate_limit(settings.SCAN_RATE_LIMIT))],
+)
 async def trigger_drift_scan(
-    user: User = Depends(get_current_user),
+    user: User = Depends(forbid_viewer),
     db: AsyncSession = Depends(get_db),
 ):
     from app.tasks.tasks import recalculate_drift_scores
@@ -61,63 +143,42 @@ async def visualize_graph(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get knowledge graph in D3.js-compatible format for visualization."""
-    entities_q = await db.execute(
-        select(Entity).where(Entity.org_id == user.org_id).limit(500)
+    """Document-contradiction graph: nodes = live docs, edges = inter-doc contradictions.
+
+    Built entirely from the ContradictionPair table (claim-grain) — no entity
+    extraction, no LLM. Edge weight = number of contradicting claim pairs between two
+    documents. (The legacy Entity/Relation graph is retained in the models and
+    `graph/builder.py` for a possible future feature, but this route no longer depends
+    on it — entity extraction was never wired into the pipeline.)
+    """
+    # Nodes: live documents in the org.
+    docs_q = await db.execute(
+        select(Document).where(Document.org_id == user.org_id, Document.deleted_at.is_(None))
     )
-    entities = entities_q.scalars().all()
-    entity_map = {str(e.id): e for e in entities}
+    documents = docs_q.scalars().all()
 
-    relations_q = await db.execute(
-        select(Relation).where(Relation.org_id == user.org_id).limit(1000)
+    # Resolution maps (live docs only): claim/chunk id -> document id.
+    claim_rows = await db.execute(
+        select(Claim.id, Claim.document_id)
+        .join(Document, Claim.document_id == Document.id)
+        .where(Document.org_id == user.org_id, Document.deleted_at.is_(None))
     )
-    relations = relations_q.scalars().all()
+    claim_to_doc = {str(cid): str(did) for cid, did in claim_rows.all()}
 
-    nodes = [
-        {
-            "id": str(e.id),
-            "name": e.name,
-            "type": e.entity_type,
-            "label": e.name.replace("_", " ").title(),
-        }
-        for e in entities
-    ]
+    chunk_rows = await db.execute(
+        select(Chunk.id, Chunk.document_id)
+        .join(Document, Chunk.document_id == Document.id)
+        .where(Document.org_id == user.org_id, Document.deleted_at.is_(None))
+    )
+    chunk_to_doc = {str(cid): str(did) for cid, did in chunk_rows.all()}
 
-    links = [
-        {
-            "source": str(r.source_entity_id),
-            "target": str(r.target_entity_id),
-            "relation": r.relation_type,
-            "confidence": r.confidence,
-        }
-        for r in relations
-        if str(r.source_entity_id) in entity_map and str(r.target_entity_id) in entity_map
-    ]
-
-    # Inject Contradiction Links
-    contradictions_q = await db.execute(
+    # Edges: contradiction pairs grouped by document pair.
+    pairs_q = await db.execute(
         select(ContradictionPair).where(ContradictionPair.org_id == user.org_id)
     )
-    contradictions = contradictions_q.scalars().all()
+    pairs = pairs_q.scalars().all()
 
-    # Map chunk_id to its entities
-    chunk_to_entities: dict[str, list[str]] = {}
-    for e in entities:
-        if e.source_chunk_id:
-            chunk_to_entities.setdefault(str(e.source_chunk_id), []).append(str(e.id))
-
-    for c in contradictions:
-        a_entities = chunk_to_entities.get(str(c.chunk_a_id), [])
-        b_entities = chunk_to_entities.get(str(c.chunk_b_id), [])
-
-        if a_entities and b_entities:
-            links.append({
-                "source": a_entities[0],
-                "target": b_entities[0],
-                "relation": "CONTRADICTS",
-                "confidence": c.confidence,
-            })
-
+    nodes, links = build_document_contradiction_graph(documents, pairs, claim_to_doc, chunk_to_doc)
     return GraphVisualizationResponse(nodes=nodes, links=links)
 
 

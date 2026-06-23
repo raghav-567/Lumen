@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, forbid_viewer
 from app.core.database import get_db
 from app.models.models import Alert, AlertStatus, AlertSeverity, User
 from app.schemas.schemas import (
@@ -99,7 +99,7 @@ async def alert_stats(
 async def update_alert(
     alert_id: str,
     req: AlertUpdateRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(forbid_viewer),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(

@@ -12,11 +12,10 @@ from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.core.security import (
     create_access_token,
-    create_refresh_token,
     hash_password,
     verify_password,
 )
-from app.models.models import Organization, User
+from app.models.models import Organization, User, UserRole
 from app.schemas.schemas import (
     LoginRequest,
     RegisterRequest,
@@ -36,19 +35,21 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     org = Organization(id=uuid4(), name=req.org_name)
     db.add(org)
 
+    # The user who creates an organization is its ADMIN (otherwise no one in a
+    # freshly-registered org could ever reach the admin endpoints).
     user = User(
         id=uuid4(),
         email=req.email,
         full_name=req.full_name,
         password_hash=hash_password(req.password),
         org_id=org.id,
+        role=UserRole.ADMIN,
     )
     db.add(user)
     await db.commit()
 
     access_token = create_access_token({"sub": str(user.id)})
-    refresh_token = create_refresh_token({"sub": str(user.id)})
-    return TokenResponse(access_token=access_token, refresh_token=refresh_token)
+    return TokenResponse(access_token=access_token)
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -59,8 +60,7 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     access_token = create_access_token({"sub": str(user.id)})
-    refresh_token = create_refresh_token({"sub": str(user.id)})
-    return TokenResponse(access_token=access_token, refresh_token=refresh_token)
+    return TokenResponse(access_token=access_token)
 
 
 @router.get("/me", response_model=UserResponse)

@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from sqlalchemy import or_, and_
 
 from app.core.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, forbid_viewer
 from app.models.models import (
     ContradictionPair, ReviewStatus, Document, User, Chunk,
 )
@@ -66,7 +66,7 @@ async def submit_review(
     contradiction_id: str,
     body: ReviewSubmission,
     session=Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(forbid_viewer),
 ):
     """Submit a review verdict on a contradiction pair."""
     from sqlalchemy import select
@@ -80,8 +80,12 @@ async def submit_review(
     if status_upper not in valid_statuses:
         raise HTTPException(400, f"Invalid review_status. Must be one of: {valid_statuses}")
 
+    # Scope to the caller's org — a pair in another org must read as 404.
     result = await session.execute(
-        select(ContradictionPair).where(ContradictionPair.id == contradiction_id)
+        select(ContradictionPair).where(
+            ContradictionPair.id == contradiction_id,
+            ContradictionPair.org_id == current_user.org_id,
+        )
     )
     pair = result.scalar_one_or_none()
     if not pair:
@@ -143,7 +147,6 @@ async def submit_review(
 @router.get("")
 async def list_contradictions(
     review_status: str | None = None,
-    org_id: str | None = None,
     limit: int = 50,
     offset: int = 0,
     session=Depends(get_db),
@@ -152,12 +155,10 @@ async def list_contradictions(
     """List contradiction pairs with optional filtering by review status."""
     from sqlalchemy import select, func
 
-    query = select(ContradictionPair)
-
-    if org_id:
-        query = query.where(ContradictionPair.org_id == org_id)
-    else:
-        query = query.where(ContradictionPair.org_id == current_user.org_id)
+    # Always scoped to the caller's org — no caller-supplied org override.
+    query = select(ContradictionPair).where(
+        ContradictionPair.org_id == current_user.org_id
+    )
 
     if review_status:
         try:
@@ -210,14 +211,13 @@ async def list_contradictions(
 
 @router.get("/stats")
 async def review_stats(
-    org_id: str | None = None,
     session=Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Get review workflow statistics for the organization."""
+    """Get review workflow statistics for the caller's organization."""
     from sqlalchemy import select, func
 
-    target_org = org_id or str(current_user.org_id)
+    target_org = str(current_user.org_id)
 
     # Count by review status
     status_query = (
@@ -262,7 +262,7 @@ async def review_stats(
 async def generate_explanation(
     contradiction_id: str,
     session=Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(forbid_viewer),
 ):
     """Generate an LLM explanation for a contradiction (lazy mode).
 
@@ -272,8 +272,13 @@ async def generate_explanation(
     from sqlalchemy import select
     from app.contradiction.detector import generate_explanation_on_demand
 
+    # Scope to the caller's org so this can't trigger an LLM call on another
+    # tenant's data.
     result = await session.execute(
-        select(ContradictionPair).where(ContradictionPair.id == contradiction_id)
+        select(ContradictionPair).where(
+            ContradictionPair.id == contradiction_id,
+            ContradictionPair.org_id == current_user.org_id,
+        )
     )
     pair = result.scalar_one_or_none()
     if not pair:
