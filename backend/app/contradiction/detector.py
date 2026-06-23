@@ -39,6 +39,8 @@ class ContradictionResult:
     gate_similarity: float = 0.0   # embedding cosine similarity at time of detection
     confidence_band: str = ""      # "high", "borderline", or "" — routes borderline to review queue
     requires_review: bool = False  # True for borderline pairs that need human validation
+    scan_path: str = ""            # "structured" or "embedding" — which router path produced this
+    contradiction_type: str = ""   # taxonomy subtype (direct_opposition, outcome_inversion, ...)
 
 
 # ── Gemini client ────────────────────────────────────────────────
@@ -409,6 +411,7 @@ def scan_claims_nli(
     top_k: int = 5,
     metrics: "PipelineMetrics | None" = None,
     source_modality: str | None = None,
+    target_document_id: str | None = None,
 ) -> tuple[list[ContradictionResult], list[str]]:
     """Compare a claim against other claims using NLI with hierarchical reduction.
 
@@ -425,19 +428,26 @@ def scan_claims_nli(
     else:
         retrieve_k = settings.RERANK_RETRIEVE_K if settings.RERANK_ENABLED else top_k + 5
 
+    # When restricted to a specific partner document (pairwise routed scan),
+    # filter retrieval to that doc so near-duplicate docs can't crowd top-K and
+    # hide a genuine contradiction partner.
+    base_filter = {"is_claim": True}
+    if target_document_id:
+        base_filter["document_id"] = target_document_id
+
     try:
         similar_claims = query_similar(
             org_id,
             query_embedding,
             top_k=retrieve_k,
-            where_filter={"is_claim": True}
+            where_filter=base_filter,
         )
         has_results = (
             similar_claims and similar_claims.get("ids")
             and similar_claims["ids"][0]
             and len(similar_claims["ids"][0]) > 0
         )
-        if not has_results:
+        if not has_results and not target_document_id:
             similar_claims = query_similar(
                 org_id,
                 query_embedding,
@@ -633,6 +643,8 @@ def scan_claims_nli(
             gate_similarity=cand.get("similarity", 0.0),
             confidence_band=confidence_band,
             requires_review=requires_review,
+            scan_path="embedding",
+            contradiction_type=classify_pair_taxonomy(claim_text, cand_text),
         ))
 
     if metrics:
@@ -647,6 +659,38 @@ def scan_claims_nli(
 def generate_explanation_on_demand(claim_a: str, claim_b: str, confidence: float) -> str:
     """Generate explanation when user views a contradiction (lazy mode)."""
     return _generate_explanation(claim_a, claim_b, confidence)
+
+
+def classify_pair_taxonomy(text_a: str, text_b: str) -> str:
+    """Best-effort taxonomy subtype for a detected contradiction.
+
+    Extracts a proposition from each sentence and runs the taxonomy classifier.
+    Returns the subtype value (e.g. "outcome_inversion") or "" when the pair
+    can't be confidently subtyped (entities/attributes don't align). Never
+    raises — taxonomy labelling is advisory, not required for storage.
+    """
+    try:
+        from app.contradiction.proposition_extractor import extract_propositions
+        from app.contradiction.taxonomy_classifier import ContradictionTaxonomyClassifier
+
+        props_a = extract_propositions(text_a)
+        props_b = extract_propositions(text_b)
+        if not props_a or not props_b:
+            return ""
+
+        classifier = ContradictionTaxonomyClassifier()
+        best = ""
+        best_conf = 0.0
+        for pa in props_a:
+            for pb in props_b:
+                result = classifier.classify(pa, pb)
+                if result.type is not None and result.confidence > best_conf:
+                    best = result.type.value
+                    best_conf = result.confidence
+        return best
+    except Exception as e:
+        logger.debug(f"Taxonomy classification skipped: {e}")
+        return ""
 
 
 def _deduplicate(results: list[ContradictionResult]) -> list[ContradictionResult]:
@@ -742,7 +786,7 @@ def scan_structured(
                     chunk_b_id=pb.chunk_id or f"{doc_b_id}_structured",
                     chunk_a_text=pa.source_sentence,
                     chunk_b_text=pb.source_sentence,
-                    classification=result.type.value.upper(),
+                    classification="CONTRADICTORY",
                     confidence=result.confidence,
                     explanation=(
                         f"[{result.type.value}] {result.reason}. "
@@ -751,6 +795,8 @@ def scan_structured(
                     conflicting_claims=[pa.source_sentence, pb.source_sentence],
                     confidence_band="high" if result.confidence >= 0.75 else "borderline",
                     requires_review=result.confidence < 0.75,
+                    scan_path="structured",
+                    contradiction_type=result.type.value,
                 ))
 
     logger.info(f"Structured scan: {len(results)} contradictions found")
@@ -766,51 +812,51 @@ def scan_structured(
 
 def _run_embedding_scan(
     org_id: str,
-    doc_a_chunk_ids: list[str] | None,
-    doc_b_chunk_ids: list[str] | None,
     doc_a_id: str,
     doc_b_id: str,
     metrics: "PipelineMetrics | None" = None,
 ) -> list[ContradictionResult]:
-    """Run the embedding-based scan path for document chunks.
+    """Embedding scan path: claim-level pairwise NLI between two documents.
 
-    Fetches chunk content from ChromaDB and delegates to scan_claims_nli
-    for each chunk pair.
+    Compares each of doc_a's claims against doc_b's claims (retrieval restricted
+    to doc_b), so polarity-flipped claims are caught at claim granularity rather
+    than collapsed into coarse chunk comparisons. Results are keyed by claim
+    embedding IDs so the caller can dedup/persist at claim grain (Fix C).
     """
-    from app.ingestion.chroma_store import get_or_create_collection
+    from app.ingestion.indexer import get_or_create_collection
 
-    all_chunk_ids = []
-    if doc_a_chunk_ids:
-        all_chunk_ids.extend(doc_a_chunk_ids)
-    if doc_b_chunk_ids:
-        all_chunk_ids.extend(doc_b_chunk_ids)
-
-    if not all_chunk_ids:
-        logger.info("Embedding scan fallback: no chunk IDs provided, skipping")
+    if not doc_a_id or not doc_b_id:
+        logger.info("Embedding scan: missing document IDs, skipping")
         return []
 
-    # Fetch content from ChromaDB
-    collection = get_or_create_collection(org_id)
+    # Fetch doc_a's claims (id + text) from the claims collection.
+    collection = get_or_create_collection(org_id, name_suffix="claims")
     try:
-        got = collection.get(ids=all_chunk_ids, include=["documents", "metadatas"])
+        got = collection.get(where={"document_id": doc_a_id}, include=["documents"])
     except Exception as e:
-        logger.warning(f"Embedding scan fallback: failed to fetch chunks from ChromaDB: {e}")
+        logger.warning(f"Embedding scan: failed to fetch claims for {doc_a_id}: {e}")
+        return []
+
+    ids = got.get("ids", []) or []
+    docs = got.get("documents", []) or []
+    if not ids:
+        logger.info(f"Embedding scan: no claims indexed for doc {doc_a_id}")
         return []
 
     results = []
-    for idx, chunk_id in enumerate(got.get("ids", [])):
-        text = (got.get("documents") or [])[idx] if got.get("documents") else None
+    for idx, claim_id in enumerate(ids):
+        text = docs[idx] if idx < len(docs) else None
         if not text:
             continue
-
-        chunk_results, _ = scan_claims_nli(
+        claim_results, _ = scan_claims_nli(
             org_id=org_id,
-            claim_id=chunk_id,
+            claim_id=claim_id,
             claim_text=text,
             top_k=5,
             metrics=metrics,
+            target_document_id=doc_b_id,
         )
-        results.extend(chunk_results)
+        results.extend(claim_results)
 
     return _deduplicate(results)
 
@@ -847,6 +893,12 @@ def scan_document_pair_routed(
         f"min={min_confidence:.2f}, threshold={threshold}"
     )
 
+    def _stamp(results: list[ContradictionResult], path: str) -> list[ContradictionResult]:
+        for r in results:
+            if not r.scan_path:
+                r.scan_path = path
+        return results
+
     if min_confidence >= threshold:
         try:
             results = scan_structured(
@@ -859,7 +911,7 @@ def scan_document_pair_routed(
                 doc_b_chunk_ids=doc_b_chunk_ids,
                 metrics=metrics,
             )
-            return results, "structured"
+            return _stamp(results, "structured"), "structured"
         except Exception as e:
             logger.warning(
                 f"Structured scan failed, falling back to embedding scan: {e}",
@@ -868,22 +920,18 @@ def scan_document_pair_routed(
             # Actually run embedding scan instead of returning empty
             results = _run_embedding_scan(
                 org_id=org_id,
-                doc_a_chunk_ids=doc_a_chunk_ids,
-                doc_b_chunk_ids=doc_b_chunk_ids,
                 doc_a_id=doc_a_id,
                 doc_b_id=doc_b_id,
                 metrics=metrics,
             )
-            return results, "embedding"
+            return _stamp(results, "embedding"), "embedding"
     else:
         # Insufficient document structure — use embedding-based scan
         logger.info("Using embedding scan path (insufficient document structure)")
         results = _run_embedding_scan(
             org_id=org_id,
-            doc_a_chunk_ids=doc_a_chunk_ids,
-            doc_b_chunk_ids=doc_b_chunk_ids,
             doc_a_id=doc_a_id,
             doc_b_id=doc_b_id,
             metrics=metrics,
         )
-        return results, "embedding"
+        return _stamp(results, "embedding"), "embedding"
