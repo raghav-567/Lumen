@@ -96,7 +96,7 @@ export default function DocumentsPage() {
   };
 
   return (
-    <div className="fade-in list-page">
+    <div className="fade-in">
       <div className="page-header">
         <div>
           <h1 className="page-title"><FileText size={24} /> Documents</h1>
@@ -147,7 +147,7 @@ export default function DocumentsPage() {
             <tbody>
               {docs.map((doc, idx) => (
                 <tr key={doc.id} style={{ animation: `fadeInUp 300ms ease-out ${idx * 30}ms both` }}>
-                  <td style={{ fontWeight: 500 }}>
+                  <td style={{ fontWeight: 500, overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
                     {doc.title}
                     {(doc as any).version_number > 1 && (
                       <span className="badge" style={{ marginLeft: 6, fontSize: '0.6rem' }}>
@@ -156,7 +156,7 @@ export default function DocumentsPage() {
                     )}
                   </td>
                   <td><span className="badge">{doc.file_type}</span></td>
-                  <td>{formatSize(doc.file_size)}</td>
+                  <td style={{ whiteSpace: 'nowrap' }}>{formatSize(doc.file_size)}</td>
                   <td>
                     <span style={{ color: getDriftColor(doc.factual_drift_score || 0), fontWeight: 600 }}>
                       {(doc.factual_drift_score || 0).toFixed(1)}
