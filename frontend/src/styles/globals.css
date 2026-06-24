@@ -116,6 +116,10 @@ a { color: inherit; }
 
 .main-content {
   flex: 1;
+  /* min-width: 0 lets this flex item shrink below its content's intrinsic
+     width, so an overflow-x:auto child (e.g. .table-wrapper) scrolls internally
+     instead of forcing the whole column to overflow the viewport. */
+  min-width: 0;
   padding: var(--space-2xl) var(--space-2xl);
   margin-left: 264px;
   transition: margin-left var(--transition-base);
@@ -383,12 +387,14 @@ a { color: inherit; }
   box-shadow: var(--shadow-sm);
 }
 
-.table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+/* The table always fits its container width (no horizontal scroll) — every
+   column stays in view; only the title cell wraps when space is tight. */
+.table { width: 100%; border-collapse: collapse; font-size: 0.9rem; table-layout: auto; }
 
 .table thead { background: transparent; }
 .table th {
   text-align: left;
-  padding: 13px 18px;
+  padding: 12px 12px;
   font-size: 0.7rem;
   font-weight: 600;
   text-transform: uppercase;
@@ -398,7 +404,7 @@ a { color: inherit; }
 }
 .table th.num, .table td.num { text-align: right; }
 
-.table td { padding: 13px 18px; color: var(--text-secondary); border: none; }
+.table td { padding: 12px 12px; color: var(--text-secondary); border: none; }
 .table tbody tr { transition: background var(--transition-fast); }
 .table tbody tr:nth-child(even) { background: var(--bg-subtle); }
 .table tbody tr:hover { background: var(--bg-active); }
