@@ -41,7 +41,20 @@ export default function DocumentsPage() {
     }
   };
 
-  useEffect(() => { loadDocs(); }, []);
+  // Drift/contradiction scoring runs asynchronously after upload (parse →
+  // embed → pairwise NLI → recalc), so a doc's drift can land seconds-to-minutes
+  // after it first appears. Poll so the UI reflects backend scores without a
+  // manual reload — otherwise an uploaded doc shows 0 forever. Skip background
+  // tabs to avoid needless requests.
+  useEffect(() => {
+    loadDocs();
+    const id = setInterval(() => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        loadDocs();
+      }
+    }, 10000);
+    return () => clearInterval(id);
+  }, []);
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
