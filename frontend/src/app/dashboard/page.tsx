@@ -46,6 +46,14 @@ export default function DashboardPage() {
       }
     };
     load();
+    // Drift is computed asynchronously after upload — poll so the overview
+    // reflects new scores without a manual reload (visible tab only).
+    const id = setInterval(() => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        load();
+      }
+    }, 10000);
+    return () => clearInterval(id);
   }, []);
 
   const avgDrift = driftScores.length
