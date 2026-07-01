@@ -10,7 +10,8 @@ scores per-document drift, and renders the result as an interactive document-con
 
 ## Demo
 
-- **Live frontend:** (https://knowledgedrift.vercel.app/)
+- **Live frontend:** [knowledgedrift.vercel.app](https://knowledgedrift.vercel.app/) — runs in
+  demo mode (bundled fixtures, no backend; any credentials sign in).
 
 ![Document-contradiction graph](docs/images/graph.png)
 
@@ -56,7 +57,7 @@ Seven stages, then an auto-dispatched contradiction scan. LLM claim extraction i
 
 ```mermaid
 flowchart TD
-    A["Upload<br/>(PDF / DOCX / TXT / MD)"] --> B["Parse"]
+    A["Upload<br/>(PDF / DOCX / TXT / MD)"] --> B["Parse<br/>(prose + tables)"]
     B --> C["Clean"]
     C --> D["Chunk<br/>(semantic, ~512 tokens)"]
     D --> E["Noise / salience filter<br/>(reject fragments)"]
@@ -110,6 +111,19 @@ over-inclusion is cheap; the loose shortlist threshold (0.30) reflects this deli
 (`UNIQUE(claim_a_id, claim_b_id)`, canonical ordering), not chunk granularity. Documents chunk
 into a few large chunks, so a chunk-level key collapsed many distinct claim contradictions into
 one row and understated drift; claim-grain keying preserves each one.
+
+**Tables as structured claims.** Policy contradictions often live in tables (targets, limits,
+dates, budgets), but a prose pipeline loses them — DOCX tables are absent from `doc.paragraphs`
+entirely, and PDF tables flatten into jumbled text the salience filter rejects. KnowledgeDrift
+extracts tables from both formats (PyMuPDF `find_tables()`; `python-docx` `doc.tables`) and
+linearizes each cell into a *parallel* declarative sentence — `"For {row}, the {column} is
+{value}."` — with structured `subject`/`predicate`/`value` fields. The parallel framing is the
+point: two documents disagreeing on the same cell yield sentences that differ only in the value,
+so they stay above the similarity gate and NLI flags the polarity difference (verified against
+the real model: contradicting cells score ≈1.00 contradiction; identical cells entail; different
+rows stay neutral). Table claims get their own synthetic chunk and skip the prose salience filter
+— they're already well-formed structured facts. Images and figures are intentionally out of
+scope.
 
 **Collection-per-org multi-tenancy.** Each organization gets its own ChromaDB collections
 (`org_{id}_chunks`, `org_{id}_claims`) rather than metadata filtering on a shared collection — a
@@ -186,7 +200,8 @@ hosted backend instead of demo mode, set `NEXT_PUBLIC_API_URL` to its URL and lo
 docker compose exec backend sh -c "PYTHONPATH=/app pytest tests/ -v"
 ```
 
-**156 tests passing** — unit and integration, including the cross-org isolation suite.
+**171 tests passing** — unit and integration, including the cross-org isolation and
+table-linearization suites.
 
 ## Evaluation
 
@@ -259,6 +274,11 @@ development.)
 - **LLM claim extraction is disabled** (CPU-only environment), so claim extraction is rule-based
   and contradiction subtyping is best-effort (always classified by `scan_path`; finer
   `contradiction_type` only when the rule-based taxonomy classifier is confident).
+- **Table parsing covers text cells only; images/figures are dropped.** Tables are extracted and
+  linearized into structured claims (see *Tables as structured claims*), but embedded images,
+  charts, and scanned/image-only pages are not OCR'd. For PDFs, PyMuPDF's `get_text` can't cleanly
+  exclude table regions, so a jumbled copy of table text also remains inline in the prose — it's
+  low-salience and usually filtered out, but not guaranteed zero; DOCX has no such overlap.
 
 ## Secrets
 
