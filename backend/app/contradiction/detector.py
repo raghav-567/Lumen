@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import re
 from dataclasses import dataclass, field
 
 from google import genai
@@ -21,8 +22,23 @@ from app.core.config import settings
 from app.ingestion.embedder import generate_embeddings
 from app.ingestion.indexer import query_similar
 from app.contradiction.nli import classify_claim_pairs
+from app.pipeline.noise_filter import is_structural_noise, _STOPWORDS
 
 logger = logging.getLogger(__name__)
+
+_TERM_RE = re.compile(r"[a-z0-9]+")
+
+
+def _shared_salient_terms(text_a: str, text_b: str) -> int:
+    """Count salient (non-stopword, >2 char) terms common to both claims.
+
+    A proxy for "are these two claims about the same subject" — used to reject
+    same-topic-but-different-subject NLI false positives.
+    """
+    def terms(s: str) -> set[str]:
+        return {t for t in _TERM_RE.findall(s.lower()) if len(t) > 2 and t not in _STOPWORDS}
+
+    return len(terms(text_a) & terms(text_b))
 
 
 @dataclass
@@ -503,6 +519,14 @@ def scan_claims_nli(
                 gate_passed += 1
 
             text = similar_claims["documents"][0][i] if similar_claims["documents"] else ""
+
+            # ── Structural-noise gate on the candidate ──
+            # The claim corpus contains non-claim noise (page headers, draft
+            # boilerplate, garbled table cells) that the cross-encoder pairs with
+            # everything as a high-confidence contradiction. Drop it before NLI.
+            if settings.NOISE_FILTER_ENABLED and (not text or is_structural_noise(text)):
+                continue
+
             candidates.append({
                 "id": cid,
                 "text": text,
@@ -610,11 +634,26 @@ def scan_claims_nli(
             continue
 
         # ── Fix 2.2: Entailment asymmetry check ──
-        # Only run the expensive bidirectional check if enabled and score < 0.90
-        if settings.ENTAILMENT_ASYMMETRY_CHECK and score < 0.90:
+        # Run the bidirectional check on EVERY surviving candidate, regardless of
+        # forward score. The dominant false-positive mode on real documents is a
+        # high forward-NLI score (0.95–1.0) on two same-topic but unrelated
+        # sentences; the reverse direction exposes them as one-directional
+        # (specificity_mismatch / elaboration). The old `score < 0.90` skip let
+        # exactly those high-confidence false positives straight through.
+        if settings.ENTAILMENT_ASYMMETRY_CHECK:
             genuine, reason = is_genuine_contradiction(claim_text, cand_text)
             if not genuine:
                 logger.debug(f"Filtered pair — reason: {reason} (score={score:.3f})")
+                continue
+
+        # ── Subject-overlap gate ──
+        # Two claims can be embedding-similar (same topic) yet about different
+        # subjects (a PIN definition vs a binding-code rule); the cross-encoder
+        # still calls them contradictory. Require a minimum shared-term overlap
+        # so a genuine contradiction is anchored to common subject matter.
+        if settings.MIN_SHARED_CLAIM_TERMS > 0:
+            if _shared_salient_terms(claim_text, cand_text) < settings.MIN_SHARED_CLAIM_TERMS:
+                logger.debug(f"Filtered pair — no shared subject terms (score={score:.3f})")
                 continue
 
         # ── Lazy explanation: defer API call ──
@@ -823,31 +862,65 @@ def _run_embedding_scan(
     than collapsed into coarse chunk comparisons. Results are keyed by claim
     embedding IDs so the caller can dedup/persist at claim grain (Fix C).
     """
-    from app.ingestion.indexer import get_or_create_collection
+    from app.ingestion.indexer import get_or_create_collection, invalidate_collection_cache
 
     if not doc_a_id or not doc_b_id:
         logger.info("Embedding scan: missing document IDs, skipping")
         return []
 
-    # Fetch doc_a's claims (id + text) from the claims collection.
-    collection = get_or_create_collection(org_id, name_suffix="claims")
+    # Fetch doc_a's claims (id + text + metadata) from the claims collection. A
+    # cached handle can be stale after a reindex; refetch once before giving up,
+    # since returning [] here would silently drop the whole document from the scan.
+    def _fetch_claims():
+        return get_or_create_collection(org_id, name_suffix="claims").get(
+            where={"document_id": doc_a_id}, include=["documents", "metadatas"]
+        )
+
     try:
-        got = collection.get(where={"document_id": doc_a_id}, include=["documents"])
+        got = _fetch_claims()
     except Exception as e:
-        logger.warning(f"Embedding scan: failed to fetch claims for {doc_a_id}: {e}")
-        return []
+        logger.warning(f"Embedding scan: claims fetch failed for {doc_a_id} ({e}); refetching once")
+        invalidate_collection_cache(org_id, "claims")
+        try:
+            got = _fetch_claims()
+        except Exception as e2:
+            logger.warning(f"Embedding scan: failed to fetch claims for {doc_a_id}: {e2}")
+            return []
 
     ids = got.get("ids", []) or []
     docs = got.get("documents", []) or []
+    metas = got.get("metadatas", []) or []
     if not ids:
         logger.info(f"Embedding scan: no claims indexed for doc {doc_a_id}")
         return []
 
-    results = []
+    # Build the set of source claims to scan, dropping structural noise (headers/
+    # boilerplate/table fragments) so they never seed a pairwise scan.
+    seeds = []
     for idx, claim_id in enumerate(ids):
         text = docs[idx] if idx < len(docs) else None
         if not text:
             continue
+        if settings.NOISE_FILTER_ENABLED and is_structural_noise(text):
+            continue
+        meta = metas[idx] if idx < len(metas) and metas[idx] else {}
+        weight = meta.get("importance_weight", 1.0) or 1.0
+        seeds.append((claim_id, text, weight))
+
+    # ── Cap source claims per pair (bounds the O(claims × candidates) scan) ──
+    # Keep the highest-importance claims so a contradiction-bearing claim, which
+    # is high-signal, still seeds the scan even on a 1000+ claim document.
+    cap = settings.EMBEDDING_SCAN_MAX_CLAIMS
+    if cap and len(seeds) > cap:
+        seeds.sort(key=lambda s: s[2], reverse=True)
+        logger.info(
+            f"Embedding scan: capping {len(seeds)} source claims to top {cap} by "
+            f"importance for {doc_a_id}↔{doc_b_id}"
+        )
+        seeds = seeds[:cap]
+
+    results = []
+    for claim_id, text, _weight in seeds:
         claim_results, _ = scan_claims_nli(
             org_id=org_id,
             claim_id=claim_id,
