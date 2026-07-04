@@ -6,8 +6,9 @@ import enum
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import (Boolean, Column, DateTime, Enum, Float, ForeignKey,
-                        Index, Integer, String, Text)
+from sqlalchemy import (Boolean, CheckConstraint, Column, DateTime, Enum, Float,
+                        ForeignKey, Index, Integer, String, Text,
+                        UniqueConstraint)
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import relationship
 
@@ -336,9 +337,50 @@ class ContradictionPair(Base):
     contradiction_type = Column(String(50), nullable=True)  # direct_opposition, outcome_inversion, etc.
     scan_path = Column(String(20), nullable=True)           # "structured" or "embedding"
 
+    # ── Claim-granularity dedup (Fix C) ──
+    # When both are set, the pair is keyed/deduped at claim granularity instead
+    # of chunk granularity (docs chunk into a few large chunks, so chunk-level
+    # dedup collapsed many distinct claim contradictions into one row). Nullable
+    # for legacy/chunk-fallback rows; the CHECK only binds when both are present.
+    claim_a_id = Column(UUID(as_uuid=True), ForeignKey("claims.id", ondelete="CASCADE"), nullable=True)
+    claim_b_id = Column(UUID(as_uuid=True), ForeignKey("claims.id", ondelete="CASCADE"), nullable=True)
+
     chunk_a = relationship("Chunk", foreign_keys=[chunk_a_id])
     chunk_b = relationship("Chunk", foreign_keys=[chunk_b_id])
     reviewer = relationship("User", foreign_keys=[reviewed_by])
+
+    __table_args__ = (
+        # Enforce a canonical ordering so (X,Y) and (Y,X) can't both be stored,
+        # and back it with a uniqueness guard. Both only bind when claim ids are
+        # non-null (NULLs compare as unknown / are distinct in Postgres).
+        CheckConstraint("claim_a_id < claim_b_id", name="ck_contradiction_claim_order"),
+        UniqueConstraint("claim_a_id", "claim_b_id", name="uq_contradiction_claim_pair"),
+        Index("ix_contradiction_claim_pair", "claim_a_id", "claim_b_id"),
+    )
+
+
+class ScannedPair(Base):
+    """Ledger of (doc_a, doc_b) pairs already run through the contradiction scanner.
+
+    Stored canonically (doc_a_id < doc_b_id), regardless of which doc was the scan
+    source, so reconciliation can cheaply diff "all live-doc pairs" against "pairs
+    already scanned" and re-queue only the gaps. Closes the concurrent/bulk-upload
+    race where one doc's shortlist runs before another's claims finish indexing,
+    so a pair is silently never scanned (CLAUDE.md §10).
+    """
+    __tablename__ = "scanned_pairs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    org_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
+    doc_a_id = Column(UUID(as_uuid=True), nullable=False)  # canonical: doc_a_id < doc_b_id
+    doc_b_id = Column(UUID(as_uuid=True), nullable=False)
+    scanned_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("doc_a_id < doc_b_id", name="ck_scanned_pair_order"),
+        UniqueConstraint("org_id", "doc_a_id", "doc_b_id", name="uq_scanned_pair"),
+        Index("ix_scanned_pairs_org", "org_id"),
+    )
 
 
 class HeuristicFeedback(Base):
