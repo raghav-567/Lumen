@@ -1,0 +1,152 @@
+services:
+  # ── PostgreSQL ─────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: knowledgedrift
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ──────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── ChromaDB (vector store, single-owner server) ───
+  # Runs as a standalone server so the API, Celery workers, and one-off scripts
+  # all connect over HTTP instead of each opening the on-disk segments directly.
+  # Concurrent embedded PersistentClients on the same volume corrupted the HNSW
+  # vector segments after deletes (stale segment / "Label not found" / drift
+  # silently reading 0). The server is the sole writer of the data files.
+  chroma:
+    image: chromadb/chroma:0.5.7
+    ports:
+      - "8001:8000"
+    environment:
+      ANONYMIZED_TELEMETRY: "False"
+      IS_PERSISTENT: "TRUE"
+    volumes:
+      - chroma_server_data:/chroma/chroma
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/v1/heartbeat').status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── Backend API ────────────────────────────────────
+  backend:
+    build: ./backend
+    # Shared tag so `backend` and `celery-worker` build the identical ./backend
+    # context ONCE instead of into two separate 4 GB images. Code is bind-mounted
+    # below, so `docker compose up` (no --build) reuses this image; only rebuild
+    # when requirements.txt changes (`docker compose build backend`).
+    image: knowledge-drift-backend:local
+    ports:
+      - "8000:8000"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/knowledgedrift
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: db+postgresql://postgres:postgres@postgres:5432/knowledgedrift
+      ANONYMIZED_TELEMETRY: "False"
+      CHROMA_TELEMETRY: "False"
+      CHROMA_HOST: chroma
+      CHROMA_PORT: "8000"
+    volumes:
+      - ./backend:/app
+      - upload_data:/app/data/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chroma:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ── Celery Worker ──────────────────────────────────
+  celery-worker:
+    # No build stanza: reuse the image the `backend` service builds (identical
+    # ./backend context). Compose builds backend:local once, then starts both
+    # from it — so the shared tag is produced exactly once and `up --build`
+    # never races two exporters onto the same image name.
+    image: knowledge-drift-backend:local
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/knowledgedrift
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: db+postgresql://postgres:postgres@postgres:5432/knowledgedrift
+      ANONYMIZED_TELEMETRY: "False"
+      CHROMA_TELEMETRY: "False"
+      CHROMA_HOST: chroma
+      CHROMA_PORT: "8000"
+    volumes:
+      - ./backend:/app
+      - upload_data:/app/data/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chroma:
+        condition: service_healthy
+    command: celery -A app.tasks.worker:celery_app worker --loglevel=info --concurrency=2
+
+  # ── Frontend ───────────────────────────────────────
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+    depends_on:
+      - backend
+
+  # ── Ollama (local LLM for claim extraction) ─────
+  ollama:
+    image: ollama/ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:11434/api/tags || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
+  upload_data:
+  chroma_data:        # legacy embedded-PersistentClient data (superseded by chroma server)
+  chroma_server_data: # owned solely by the chroma service
+  ollama_data:
