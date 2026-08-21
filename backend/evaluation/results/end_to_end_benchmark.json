@@ -1,0 +1,102 @@
+{
+  "binary_detection": {
+    "precision": 0.8571,
+    "recall": 0.6667,
+    "f1": 0.75,
+    "tp": 24,
+    "fp": 4,
+    "fn": 12,
+    "support": 36
+  },
+  "multiclass": {
+    "per_class": {
+      "contradiction": {
+        "precision": 0.8571,
+        "recall": 0.7742,
+        "f1": 0.8136,
+        "tp": 24,
+        "fp": 4,
+        "fn": 7,
+        "support": 31
+      },
+      "entailment": {
+        "precision": 1.0,
+        "recall": 0.4444,
+        "f1": 0.6154,
+        "tp": 4,
+        "fp": 0,
+        "fn": 5,
+        "support": 9
+      },
+      "evolution": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "tp": 0,
+        "fp": 0,
+        "fn": 5,
+        "support": 5
+      },
+      "neutral": {
+        "precision": 0.1667,
+        "recall": 0.6,
+        "f1": 0.2609,
+        "tp": 3,
+        "fp": 15,
+        "fn": 2,
+        "support": 5
+      }
+    },
+    "accuracy": 0.62,
+    "macro_precision": 0.506,
+    "macro_recall": 0.4546,
+    "macro_f1": 0.4225,
+    "total_samples": 50,
+    "confusion_matrix": {
+      "labels": [
+        "contradiction",
+        "entailment",
+        "evolution",
+        "neutral"
+      ],
+      "matrix": {
+        "contradiction": {
+          "contradiction": 24,
+          "entailment": 0,
+          "evolution": 0,
+          "neutral": 7
+        },
+        "entailment": {
+          "contradiction": 2,
+          "entailment": 4,
+          "evolution": 0,
+          "neutral": 3
+        },
+        "evolution": {
+          "contradiction": 0,
+          "entailment": 0,
+          "evolution": 0,
+          "neutral": 5
+        },
+        "neutral": {
+          "contradiction": 2,
+          "entailment": 0,
+          "evolution": 0,
+          "neutral": 3
+        }
+      }
+    }
+  },
+  "latency": {
+    "embedding_s": 0.68,
+    "retrieval_s": 0.021,
+    "nli_s": 2.734,
+    "total_s": 3.435,
+    "per_pair_ms": 68.7
+  },
+  "pipeline_config": {
+    "similarity_threshold": 0.55,
+    "nli_threshold": 0.6,
+    "num_pairs": 50
+  }
+}
