@@ -1,0 +1,15 @@
+{
+  "retrieval_metrics": {
+    "recall@1": 0.8611,
+    "recall@3": 1.0,
+    "recall@5": 1.0,
+    "recall@10": 1.0
+  },
+  "mrr": 0.9167,
+  "relevant_pairs": 36,
+  "total_pairs": 50,
+  "latency": {
+    "embedding_s": 35.926,
+    "retrieval_s": 0.028
+  }
+}
