@@ -13,14 +13,14 @@ class TestOrgWeightedScoring:
         result_default = compute_dual_drift_score(
             contradiction_ratio=0.5,
             avg_contradiction_confidence=0.8,
-            reference_count=3,
+            contradiction_count=3,
             authority_level=3,
             org_weights=None,
         )
         result_explicit = compute_dual_drift_score(
             contradiction_ratio=0.5,
             avg_contradiction_confidence=0.8,
-            reference_count=3,
+            contradiction_count=3,
             authority_level=3,
             org_weights={
                 "density_weight": 0.45,
@@ -38,13 +38,13 @@ class TestOrgWeightedScoring:
         result_default = compute_dual_drift_score(
             contradiction_ratio=0.1,
             avg_contradiction_confidence=0.95,
-            reference_count=1,
+            contradiction_count=1,
             org_weights=None,
         )
         result_conf_heavy = compute_dual_drift_score(
             contradiction_ratio=0.1,
             avg_contradiction_confidence=0.95,
-            reference_count=1,
+            contradiction_count=1,
             org_weights={
                 "density_weight": 0.10,
                 "confidence_weight": 0.80,
@@ -61,7 +61,7 @@ class TestOrgWeightedScoring:
             contradiction_ratio=0.0,
             semantic_shift=0.8,
             age_decay=0.5,
-            reference_count=0,
+            contradiction_count=0,
             org_weights={
                 "density_weight": 0.45,
                 "confidence_weight": 0.35,
@@ -78,7 +78,7 @@ class TestOrgWeightedScoring:
         """Result should include the weights that were used."""
         result = compute_dual_drift_score(
             contradiction_ratio=0.5,
-            reference_count=2,
+            contradiction_count=2,
             org_weights={"density_weight": 0.50, "confidence_weight": 0.30, "volume_weight": 0.20},
         )
         assert "weights_used" in result
